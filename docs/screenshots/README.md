@@ -2,7 +2,6 @@
 
 Screenshots showing the system working end-to-end, for use in the writeup.
 
-## proxmox-vm-notes-field.png
 ![Proxmox VM Notes field showing Ansible management note](proxmox-vm-notes-field.png)
 
 **What it shows:** Proxmox web UI summary page for VM 500 (ansible-debian-01) on node 'starhaven'.
