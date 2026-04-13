@@ -1,0 +1,45 @@
+# Setup Ansible Base on Proxmox and Control Node
+# - Installs Python 3 and pip on target Proxmox or bare-metal hosts
+# - Ensures required Python modules (setuptools, requests, proxmoxer) are present
+# - Prepares both control and managed nodes for Ansible + Proxmox API usage
+# - Clean, idempotent setup (safe to re-run anytime)
+#
+# Plays:
+# PLAY 1 (remote): Install Python and pip via apt, then required Python packages via pip
+# Variables you'll care about:
+# os_packages - list of system packages to install (default: python3, python3-pip)
+# python_packages - list of Python packages to install (default: setuptools, requests, proxmoxer)
+#
+# Quick start:
+# 1) Ensure your Proxmox host is defined as proxmox-vm-bm-machine or under a group like [proxmox-main] in your inventory
+# 2) ansible-playbook -i inventory/hosts.ini setup-base-ansible-proxmox.yml
+#
+# Automation-friendly:
+# - No manual steps required - everything handled by apt + pip
+# - Ideal as a first-run bootstrap for Proxmox Ansible automation
+#
+# Credit: Thomas Mozdren
+
+---
+- name: Setup Ansible base for Proxmox and control node
+  hosts: proxmox-bms
+  vars:
+    os_packages:
+      - python3
+      - python3-pip
+    python_packages:
+      - setuptools
+      - requests
+      - proxmoxer
+  gather_facts: true
+  tasks:
+    - name: Install python3 and pip
+      ansible.builtin.apt:
+        name: "{{ os_packages }}"
+        state: present
+
+    - name: Install needed modules via pip
+      ansible.builtin.pip:
+        name: "{{ python_packages }}"
+        state: present
+        extra_args: "--break-system-packages"

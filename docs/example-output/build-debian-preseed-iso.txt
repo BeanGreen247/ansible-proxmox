@@ -1,0 +1,102 @@
+kenny@Nebula:~/git/proxmox-ve-vms-ansible$ ansible-playbook -i inventory/hosts.ini build-debian-preseed-iso.yml
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+
+PLAY [Build preseed-injected Debian ISO on Proxmox node] *************************************************************************************************************************************
+
+TASK [Install ISO remaster tools (xorriso, binutils)] ****************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Check source ISO exists] ***************************************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Fail if source ISO is missing] *********************************************************************************************************************************************************
+skipping: [proxmox-vm-bm-machine]
+
+TASK [Remove stale working directory (idempotency)] ******************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Create fresh working directory] ********************************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Extract ISO content into working directory] ********************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Remove read-only flags on extracted content] *******************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Render and inject preseed.cfg into extracted ISO root] *********************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Check if GRUB config exists (EFI boot)] ************************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Patch GRUB - add preseed auto-install params to linux boot lines] **********************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Patch GRUB - reduce menu timeout to 1 second] ******************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Patch GRUB - set default to first non-graphical install entry] *************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Check if ISOLINUX txt.cfg exists (BIOS boot)] ******************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Patch ISOLINUX txt.cfg - add preseed params to append lines] ***************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Check if ISOLINUX main config exists] **************************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Patch ISOLINUX - reduce menu timeout (10 = 1 second)] **********************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Extract MBR boot record from original ISO] *********************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Check if EFI image exists for hybrid ISO] **********************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Repack ISO with BIOS + EFI boot support] ***********************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Repack ISO with BIOS-only boot (EFI image not found)] **********************************************************************************************************************************
+skipping: [proxmox-vm-bm-machine]
+
+TASK [Verify output ISO exists] **************************************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine]
+
+TASK [Fail if output ISO was not created] ****************************************************************************************************************************************************
+skipping: [proxmox-vm-bm-machine]
+
+TASK [Clean up working directory] ************************************************************************************************************************************************************
+changed: [proxmox-vm-bm-machine]
+
+TASK [Print output ISO info] *****************************************************************************************************************************************************************
+ok: [proxmox-vm-bm-machine] => {
+    "msg": [
+        "Preseed ISO built successfully.",
+        "Output: /var/lib/vz/template/iso/debian-13-amd64-preseed.iso",
+        "Size: 969.0 MiB",
+        "Reference this ISO in vms.yml -> iso_file: debian-13-amd64-preseed.iso"
+    ]
+}
+
+PLAY RECAP ***************************************************************************************
+proxmox-vm-bm-machine      : ok=21   changed=12   unreachable=0    failed=0    skipped=3    rescued=0    ignored=0
+
+kenny@Nebula:~/git/proxmox-ve-vms-ansible$ ssh ansibleuser@192.168.0.222 "ls -lh /var/lib/vz/template/iso/"
+total 37G
+-rw-r--r-- 1 root root 345M Dec 17 08:06 alpine-standard-3.23.2-x86_64.iso
+-rw-r--r-- 1 root root 1.5G Dec  1 17:15 archlinux-x86_64.iso
+-rw-r--r-- 1 root root 738M Jun 10  2023 debian-12.0.0-amd64-netinst.iso
+-rw-r--r-- 1 root root 783M Oct 16 11:08 debian-13.1.0-amd64-netinst.iso
+-rw-r--r-- 1 root root 970M Apr  1 17:21 debian-13-amd64-preseed.iso
+-rw-r--r-- 1 root root 3.6G Jan 20 06:24 debian-live-13.3.0-amd64-xfce.iso
+-rw-r--r-- 1 root root 1.9G Mar 14 12:25 debian-live-13.4.0-amd64-standard.iso
+-rw-r--r-- 1 root root 4.6G Sep 18  2025 en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso
+-rw-r--r-- 1 root root 1.2G Oct 23 05:26 Fedora-Server-netinst-x86_64-43-1.6.iso
+-rw-r--r-- 1 root root 580M Jul 12  2025 gparted-live-1.7.0-8-amd64.iso
+-rw-r--r-- 1 root root 7.9G Jan 19 10:29 rhel-10.0-x86_64-dvd.iso
+-rw-r--r-- 1 root root  12G Oct  8 08:42 rhel-9.6-x86_64-dvd.iso
+-rw-r--r-- 1 root root 754M Sep 12  2025 virtio-win.iso

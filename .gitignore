@@ -1,0 +1,16 @@
+# Ansible credentials — never commit real values
+group_vars/all/main.yml
+host_vars/*/vault.yml
+
+# Ansible retry files
+*.retry
+
+# VS Code
+.vscode/
+
+# Downloaded collections — install with: ansible-galaxy collection install -r collections/requirements.yml -p ./collections
+collections/ansible_collections
+collections/ansible_collections/*
+
+# Ansible internal cache/lock
+.ansible/

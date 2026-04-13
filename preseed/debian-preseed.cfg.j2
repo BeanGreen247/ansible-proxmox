@@ -1,0 +1,144 @@
+#### ======================================================================
+#### Debian Preseed Template - Automated Unattended Installation
+#### Compatible with Debian 12 (Bookworm) netinst ISO
+#### Rendered by Ansible - do not edit the generated .cfg directly
+#### ======================================================================
+####
+#### Required variable (must be defined before rendering):
+####   preseed_ssh_pub_key        SSH public key injected for the ansible user
+####
+#### Optional variables (all have defaults in group_vars/all/preseed_vars.yml):
+####   preseed_locale             (default: en_US.UTF-8)
+####   preseed_keymap             (default: us)
+####   preseed_timezone           (default: UTC)
+####   preseed_hostname           (default: debian-vm)
+####   preseed_domain             (default: lan)
+####   preseed_mirror_host        (default: deb.debian.org)
+####   preseed_mirror_proxy       (default: empty)
+####   preseed_debian_suite       (default: bookworm)
+####   preseed_ansible_user       (default: ansible)
+####   preseed_extra_packages     (default: empty string)
+####   preseed_ip                 (if set: uses static IP, else DHCP)
+####   preseed_netmask            (default: 255.255.255.0, used with static IP)
+####   preseed_gateway            (required if preseed_ip is set)
+####   preseed_nameserver         (default: 8.8.8.8, used with static IP)
+
+
+#### -----------------------------------------------------------------------
+#### Localization
+#### -----------------------------------------------------------------------
+d-i debian-installer/locale string {{ preseed_locale | default('en_US.UTF-8') }}
+d-i keyboard-configuration/xkb-keymap select {{ preseed_keymap | default('us') }}
+
+#### -----------------------------------------------------------------------
+#### Network
+#### -----------------------------------------------------------------------
+d-i netcfg/choose_interface select auto
+{% if preseed_ip is defined and preseed_ip %}
+# Static IP configuration
+d-i netcfg/disable_dhcp boolean true
+d-i netcfg/get_ipaddress string {{ preseed_ip }}
+d-i netcfg/get_netmask string {{ preseed_netmask | default('255.255.255.0') }}
+d-i netcfg/get_gateway string {{ preseed_gateway }}
+d-i netcfg/get_nameservers string {{ preseed_nameserver | default('8.8.8.8') }}
+d-i netcfg/confirm_static boolean true
+{% endif %}
+d-i netcfg/get_hostname string {{ preseed_hostname | default('debian-vm') }}
+d-i netcfg/get_domain string {{ preseed_domain | default('lan') }}
+d-i netcfg/wireless_wep string
+
+#### -----------------------------------------------------------------------
+#### Mirror / APT
+#### -----------------------------------------------------------------------
+d-i mirror/country string manual
+d-i mirror/http/hostname string {{ preseed_mirror_host | default('deb.debian.org') }}
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string {{ preseed_mirror_proxy | default('') }}
+d-i mirror/suite string {{ preseed_debian_suite | default('bookworm') }}
+d-i mirror/udeb/suite string {{ preseed_debian_suite | default('bookworm') }}
+
+#### -----------------------------------------------------------------------
+#### Clock / Timezone
+#### -----------------------------------------------------------------------
+d-i clock-setup/utc boolean true
+d-i time/zone string {{ preseed_timezone | default('UTC') }}
+d-i clock-setup/ntp boolean true
+
+#### -----------------------------------------------------------------------
+#### Partitioning  (single partition layout - ideal for VMs)
+#### -----------------------------------------------------------------------
+d-i partman-auto/method string regular
+d-i partman-lvm/device_remove_lvm boolean true
+d-i partman-md/device_remove_md boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+# Use full disk with the atomic recipe (single / partition)
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i partman-basicfilesystems/no_swap boolean false
+
+#### -----------------------------------------------------------------------
+#### Account setup
+#### ansible user: password login LOCKED - SSH key only (set in late_command)
+#### -----------------------------------------------------------------------
+d-i passwd/root-login boolean false
+d-i passwd/user-fullname string Ansible User
+d-i passwd/username string {{ preseed_ansible_user | default('ansible') }}
+# Locked password - authentication is via SSH key only
+d-i passwd/user-password-crypted password !
+d-i user-setup/allow-password-weak boolean true
+
+#### -----------------------------------------------------------------------
+#### Base system
+#### -----------------------------------------------------------------------
+d-i base-installer/install-recommends boolean false
+
+#### -----------------------------------------------------------------------
+#### APT setup
+#### -----------------------------------------------------------------------
+d-i apt-setup/use_mirror boolean true
+d-i apt-setup/non-free-firmware boolean true
+d-i apt-setup/non-free boolean false
+d-i apt-setup/contrib boolean false
+
+#### -----------------------------------------------------------------------
+#### Package selection
+#### openssh-server is required for Ansible to manage this VM post-install
+#### qemu-guest-agent is required for Proxmox IP discovery and clean shutdown
+#### -----------------------------------------------------------------------
+tasksel tasksel/first multiselect standard
+d-i pkgsel/include string openssh-server sudo qemu-guest-agent curl wget vim {{ preseed_extra_packages | default('') }}
+d-i pkgsel/upgrade select full-upgrade
+popularity-contest popularity-contest/participate boolean false
+
+#### -----------------------------------------------------------------------
+#### Bootloader
+#### -----------------------------------------------------------------------
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean true
+d-i grub-installer/bootdev string default
+d-i grub-installer/force-efi-extra-removable boolean true
+
+#### -----------------------------------------------------------------------
+#### Late command - configure ansible user for passwordless SSH + sudo
+#### Runs inside the installed system before reboot
+#### -----------------------------------------------------------------------
+d-i preseed/late_command string \
+    mkdir -p /target/home/{{ preseed_ansible_user | default('ansible') }}/.ssh; \
+    echo "{{ preseed_ssh_pub_key }}" > /target/home/{{ preseed_ansible_user | default('ansible') }}/.ssh/authorized_keys; \
+    chmod 700 /target/home/{{ preseed_ansible_user | default('ansible') }}/.ssh; \
+    chmod 600 /target/home/{{ preseed_ansible_user | default('ansible') }}/.ssh/authorized_keys; \
+    in-target chown -R {{ preseed_ansible_user | default('ansible') }}:{{ preseed_ansible_user | default('ansible') }} /home/{{ preseed_ansible_user | default('ansible') }}/.ssh; \
+    echo "{{ preseed_ansible_user | default('ansible') }} ALL=(ALL) NOPASSWD:ALL" > /target/etc/sudoers.d/{{ preseed_ansible_user | default('ansible') }}; \
+    in-target chmod 0440 /etc/sudoers.d/{{ preseed_ansible_user | default('ansible') }}; \
+    in-target systemctl enable qemu-guest-agent ; \
+    poweroff -f
+
+#### -----------------------------------------------------------------------
+#### Finish - fallback note (auto-dismissed in priority=critical mode)
+#### The late_command poweroff above fires first in normal operation.
+#### -----------------------------------------------------------------------
+d-i finish-install/reboot_in_progress note

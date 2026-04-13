@@ -1,0 +1,44 @@
+# group_vars/all/example_of_main.yml
+# Copy this file to group_vars/all/main.yml and fill in your values.
+# main.yml is gitignored — never commit real credentials.
+
+# -----------------------------------------------------------------------
+# Ansible become (used by update_upgrade.yml and setup-ansibleuser.yml)
+# -----------------------------------------------------------------------
+ansible_become: true
+ansible_become_method: sudo
+ansible_become_password: "{{ vault_become_password }}"
+
+# Generate with:
+#   ansible-vault encrypt_string --name 'vault_become_password' --vault-id default@prompt 'your_sudo_password'
+vault_become_password: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  your_encrypted_string_here
+
+# -----------------------------------------------------------------------
+# Proxmox API credentials (used by pve_vm_status.yml, create-vm-from-iso-proxmox.yml, etc.)
+# -----------------------------------------------------------------------
+api_user: "root@pam"
+api_token_id: "ansible-automation"
+api_token_secret: "{{ pm_api_token_secret | trim }}"
+
+# Generate with:
+#   ansible-vault encrypt_string --name 'pm_api_token_secret' --vault-id default@prompt 'your_token_secret'
+pm_api_token_secret: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  your_encrypted_string_here
+
+pm_api_validate_certs: false
+pm_node: "starhaven"
+# host/IP only, no scheme, no port
+pm_api_host: "starhaven"
+pm_api_port: 8006
+
+# -----------------------------------------------------------------------
+# VM end-user account (used by setup-debian-base.yml)
+# Leave vm_enduser_password_hash unset for SSH key only (locked password).
+# To set a password hash, store it encrypted in vault.
+# -----------------------------------------------------------------------
+# vm_enduser_password_hash: !vault |
+#   $ANSIBLE_VAULT;1.1;AES256
+#   your_encrypted_string_here

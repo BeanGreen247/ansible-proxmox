@@ -1,0 +1,87 @@
+# List of VMs to create
+#
+# Overview
+#   A simple list of VMs and their specs and isos that we want mounted.
+#   VMs marked with preseed_install: true are handled by the automated
+#   Debian installer pipeline:
+#     1. build-debian-preseed-iso.yml  - Build preseed ISO
+#     2. auto-install-debian.yml       - Boot + wait for install
+#     3. setup-debian-base.yml         - Install base packages
+#
+# What this playbook does
+#   * LIST of VM(s) to create
+#       - Creates VM "shells" (vmid, CPU/RAM, net0, agent, scsihw, etc.)
+#
+# Key features
+#   * One place/file to change VM specs
+#
+# Preseed-specific fields (used by auto-install-debian.yml)
+#   preseed_install: true/false    Flag VM for automated Debian install
+#   ip_address: "x.x.x.x"         Expected IP after install (DHCP reservation
+#                                  or static via preseed preseed_ip variable)
+#   preseed_ip: "x.x.x.x"         (optional) static IP passed into the preseed
+#   preseed_hostname: "hostname"   (optional) per-VM hostname override
+#
+# Absolute minimum of parameters to create a VM
+#
+#     vms:
+#       - name: "ansible-minimal-vm"
+#         vmid: 600
+#         ostype: "l26"
+#         iso_storage: "local"
+#         iso_path: "iso/"
+#         iso_file: "debian-13-amd64-preseed.iso"
+#
+# Credit: Thomas Mozdren
+
+vms:
+#
+#- name: "ansible-win10-vm"
+#  vmid: 502
+#  boot: "order=scsi0;ide2;net0"
+#  bootdisk: scsi0
+#  onboot: false
+#  memory: 8192
+#  cores: 4
+#  net0: "virtio,bridge=vmbr0"
+#  ostype: "win10"
+#  agent: 1
+#  disk_size_gb: 80
+#  storage: "local-lvm"
+#  iso_storage: "local"
+#  iso_path: "iso/"
+#  iso_file: "en-us_windows_10_iot_enterprise_ltsc_2021_x64_dvd_257ad90f.iso"
+
+# -----------------------------------------------------------------------
+# Preseed auto-install example
+# Uses the ISO built by build-debian-preseed-iso.yml
+# Managed by: auto-install-debian.yml + setup-debian-base.yml
+# -----------------------------------------------------------------------
+- name: "ansible-debian-01"
+  vmid: 500
+  # Boot from ISO first, then disk (preseed auto-install)
+  boot: "order=ide2;scsi0;net0"
+  bootdisk: scsi0
+  onboot: false
+  memory: 1024
+  cores: 2
+  net0: "virtio,bridge=vmbr0"
+  ostype: "l26"
+  agent: 1
+  disk_size_gb: 32
+  storage: "local-lvm"
+  iso_storage: "local"
+  iso_path: "iso/"
+  # Reference the preseed ISO built by build-debian-preseed-iso.yml
+  iso_file: "debian-13-amd64-preseed.iso"
+  # --- Preseed install flags ---
+  # Set to true to include this VM in auto-install-debian.yml
+  preseed_install: true
+  # ip_address is OPTIONAL - if omitted, the IP is auto-discovered via
+  # the qemu-guest-agent after install (recommended).
+  # Set it if you have a known static IP or DHCP reservation.
+  # ip_address: "192.168.0.50"
+  # Optional: static IP injected into the preseed (uncomment to use)
+  preseed_ip: "192.168.0.206"
+  preseed_gateway: "192.168.0.1"
+  preseed_hostname: "dev-debian-01"

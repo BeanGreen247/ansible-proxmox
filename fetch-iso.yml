@@ -1,0 +1,69 @@
+# Fetch ISOs for Proxmox VMs (Fully Automated * API-First)
+#
+# Overview
+#   End-to-end, idempotent VM provisioning on Proxmox using Ansible + Proxmox API only.
+#   No UI clicks. Safe to re-run. Great for CI/CD, cron, or one-liners.
+#
+# What this playbook does
+#   * PLAY 1 (remote over SSH): Ensure a boot ISO exists on the target Proxmox node
+#       - Creates the ISO directory ({{ iso_dir }})
+#       - Downloads the ISO if missing from {{ iso_url }} to {{ iso_dir }}/{{ iso_file }}
+#       - NOTE: Currently a single ISO source; VMs consume it via {{ item.iso_storage }}:{{ item.iso_path }}
+#
+# Key features
+#   * Clean idempotency (safe to re-apply without duplicate resources)
+#
+# Inputs & variables
+#   ISO handling (PLAY):
+#     iso_dir, iso_url, iso_file
+#
+# Task tags (use -t/--tags to target specific steps)
+#   checkIso    => Ensure ISO presence
+#
+# Quick start
+#   1) Create a Proxmox API token (e.g., root@pam + token ID/secret) with VM privileges.
+#   2) Put your Proxmox node under the [proxmox-bms] group in inventory/hosts.ini.
+#   3) Run:
+#        ansible-playbook -i inventory/hosts.ini fetch-iso.yml --extra-vars '{"iso_url":"direct_url_to_iso_file","iso_file":"the_iso_file_itself.iso"}'
+#   N) Example:
+#        ansible-playbook -i inventory/hosts.ini fetch-iso.yml --extra-vars
+#           '{"iso_url":"https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.1.0-amd64-netinst.iso",
+#             "iso_file":"debian-13.1.0-amd64-netinst.iso"}'
+#
+# Credit: Thomas Mozdren
+
+---
+# PLAY fetch ISO onto the Proxmox node over SSH, if needed and tag checkIso is called
+# TODO: make it take data from vms.yml for desired iso
+# for now it checks for debian netinstall iso
+- name: Ensure ISO is present on Proxmox storage
+  hosts: proxmox-bms
+  become: true
+  gather_facts: false
+  vars:
+    iso_dir: "/var/lib/vz/template/iso"
+  tasks:
+    - name: Create ISO directory if needed
+      ansible.builtin.file:
+        path: "{{ iso_dir }}"
+        state: directory
+        mode: "0755"
+      tags: [always]
+
+    - name: Download ISO if missing
+      ansible.builtin.get_url:
+        url: "{{ iso_url }}"
+        dest: "{{ iso_dir }}/{{ iso_file }}"
+        mode: "0644"
+        force: false
+      register: result
+      tags: [always]
+
+    - name: Print status of ISO download
+      ansible.builtin.debug:
+        msg:
+          - "Changed: {{ result.changed }}"
+          - "Downloaded to: {{ result.dest | default('n/a') }}"
+          - "URL: {{ result.url | default(iso_url) }}"
+          - "Size (bytes): {{ result.size | default('unknown') }}"
+      tags: [always]

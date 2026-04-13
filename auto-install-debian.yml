@@ -1,0 +1,463 @@
+# Auto-Install Debian via Preseed ISO (Fully Automated * API-First)
+#
+# Overview
+#   Boots one or more Proxmox VMs from the preseed ISO and waits until
+#   Debian finishes installing and the ansible user is reachable over SSH.
+#   After this playbook succeeds, run setup-debian-base.yml to install
+#   the base software stack.
+#
+# Pre-requisites
+#   1) Preseed ISO built and in Proxmox ISO storage:
+#        ansible-playbook -i inventory/hosts.ini fetch-iso.yml ...
+#        ansible-playbook -i inventory/hosts.ini build-debian-preseed-iso.yml
+#   2) VM created with the preseed ISO mounted on ide2:
+#        ansible-playbook -i inventory/hosts.ini create-vm-from-iso-proxmox.yml \
+#          --tags "createVMs,createDisks,mountIso,bootOrder"
+#
+# What this playbook does
+#   * PLAY 1 (localhost via API): Boot selected VMs
+#       - Starts each VM with state=started
+#       - Only targets VMs whose definition includes preseed_install: true
+#   * PLAY 2 (localhost): Auto-discover IP + wait for SSH
+#       - Polls the Proxmox guest agent API until qemu-guest-agent reports
+#         a non-loopback IPv4 on the freshly installed system
+#       - No ip_address required in vms.yml - IP is discovered automatically
+#       - ip_address in vms.yml is optional: if set it is used directly,
+#         skipping guest agent polling (useful for known static IPs)
+#       - Timeout controlled by preseed_ssh_wait_timeout (default: 40 min)
+#   * PLAY 3 (localhost via API): Verify SSH, eject ISO, set boot order
+#       - Confirms ansible user SSH + sudo access
+#       - Ejects the install ISO from ide2
+#       - Switches boot order to disk-first
+#       - Prints the discovered IP for adding to inventory
+#
+# Inputs & variables
+#   From group_vars/all/preseed_vars.yml:
+#     preseed_ssh_wait_timeout, preseed_ssh_wait_delay, preseed_boot_wait_seconds
+#   Per VM in vms.yml (fields used by this playbook):
+#     name, vmid                        - VM identity
+#     preseed_install: true             - Flag to select VMs for this playbook
+#     ip_address (optional)             - Skip guest agent polling, use this IP directly
+#     preseed_ansible_user (optional)   - Override the ansible SSH user per VM
+#
+# Quick start
+#   ansible-playbook -i inventory/hosts.ini auto-install-debian.yml
+#
+# Notes & caveats
+#   * Debian netinst downloads packages from the internet - allow 20-40 minutes.
+#   * IP auto-discovery requires qemu-guest-agent (installed by the preseed).
+#   * The install ISO (ide2) is ejected automatically after SSH confirms OK.
+#   * After this playbook, add the discovered IP to inventory and run
+#     setup-debian-base.yml to complete base configuration.
+#
+# Credit: Thomas Mozdren
+---
+# ======================================================================
+# PLAY 1 - Boot VMs marked for preseed installation
+# ======================================================================
+- name: Boot VMs for preseed Debian installation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+  - group_vars/all/vms.yml
+  vars:
+    pm_node: "{{ lookup('env', 'PM_NODE') | default('starhaven', true) }}"
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST') | default('192.168.0.222', true) }}"
+    pm_api_user: "{{ lookup('env', 'PM_API_USER') | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID') | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+  tasks:
+  # Filter only VMs flagged for preseed installation
+  - name: Build list of preseed-install VMs
+    ansible.builtin.set_fact:
+      preseed_vms: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list }}"
+    tags: [ always ]
+
+  - name: Fail if no VMs are flagged for preseed install
+    ansible.builtin.fail:
+      msg: >-
+        No VMs have 'preseed_install: true' in vms.yml. Add that field to any VM you want auto-installed.
+    when: preseed_vms | length == 0
+    tags: [ always ]
+
+  - name: Start VMs for preseed installation
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      state: started
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, boot ]
+
+  - name: Print booted VMs
+    ansible.builtin.debug:
+      msg: "Started VM: {{ item.name }} (vmid={{ item.vmid }}) - IP will be auto-discovered via guest agent"
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, boot ]
+
+# ======================================================================
+# PLAY 2 - Discover IP via guest agent, then wait for SSH
+# ======================================================================
+- name: Discover VM IPs via guest agent and wait for SSH
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+  - group_vars/all/vms.yml
+  vars:
+    pm_node: "{{ lookup('env', 'PM_NODE') | default('starhaven', true) }}"
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST') | default('192.168.0.222', true) }}"
+    pm_api_user: "{{ lookup('env', 'PM_API_USER') | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID') | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+  tasks:
+  - name: Build list of preseed-install VMs
+    ansible.builtin.set_fact:
+      preseed_vms: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list }}"
+    tags: [ always ]
+
+  # ------------------------------------------------------------------ #
+  # Fast path: ip_address already defined in vms.yml - use it directly
+  # ------------------------------------------------------------------ #
+  - name: Use static ip_address for VMs that have one defined
+    ansible.builtin.set_fact:
+      discovered_ips: >-
+        {{
+          discovered_ips | default({}) | combine({
+            item.name: item.ip_address
+          })
+        }}
+    loop: "{{ preseed_vms | selectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, wait ]
+
+  # ------------------------------------------------------------------ #
+  # Auto-discovery path for VMs without a static ip_address.
+  #
+  # The preseed is configured with 'exit/halt=true' so the VM powers off
+  # cleanly when the install is done instead of rebooting. This lets us:
+  #   1) Detect install completion by watching for status=stopped
+  #   2) Eject the ISO and fix boot order while the VM is safely off
+  #   3) Power it on so it boots from disk (no reinstall loop)
+  #   4) Poll the guest agent for the IP of the running installed system
+  # ------------------------------------------------------------------ #
+  - name: "Wait for install to complete - VM halts when done (up to {{ (preseed_ssh_wait_timeout | int // 60) }} min)"
+    ansible.builtin.uri:
+      url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.vmid }}/status/current"
+      headers:
+        Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: 200
+    register: _install_complete_poll
+    until: _install_complete_poll.json.data.status == 'stopped'
+    retries: "{{ (preseed_ssh_wait_timeout | int // preseed_ssh_wait_delay | int) }}"
+    delay: "{{ preseed_ssh_wait_delay }}"
+    loop: "{{ preseed_vms | rejectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }} (vmid={{ item.vmid }})"
+    tags: [ preseed, wait, discover ]
+
+  - name: Eject install ISO from ide2 (VM is halted - safe to remove)
+    community.proxmox.proxmox_disk:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.vmid }}"
+      disk: "ide2"
+      state: absent
+    loop: "{{ preseed_vms | rejectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, wait, discover ]
+
+  - name: Set boot order to disk-first before powering on
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      boot: "order=scsi0;net0"
+      bootdisk: scsi0
+      update: true
+      state: present
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ preseed_vms | rejectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, wait, discover ]
+
+  - name: Power on VMs to boot from installed disk
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      state: started
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ preseed_vms | rejectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ preseed, wait, discover ]
+
+  - name: "Wait {{ preseed_boot_wait_seconds }}s for the installed system to boot"
+    ansible.builtin.pause:
+      seconds: "{{ preseed_boot_wait_seconds }}"
+    when: preseed_vms | rejectattr('ip_address', 'defined') | list | length > 0
+    tags: [ preseed, wait, discover ]
+
+  # Use the Proxmox guest agent exec API to run 'hostname -I' inside the VM.
+  # Two-step: POST starts the command and returns a PID, GET retrieves the output.
+  # No delegation, no become, no sudo - uses the same API token auth as everything else.
+  - name: Start guest exec - hostname -I (via Proxmox agent API)
+    ansible.builtin.uri:
+      url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.vmid }}/agent/exec"
+      method: POST
+      headers:
+        Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+      body_format: json
+      body:
+        command: ["hostname", "-I"]
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [200, 500]
+    register: _exec_start
+    until: _exec_start.status == 200
+    retries: 20
+    delay: 10
+    loop: "{{ preseed_vms | rejectattr('ip_address', 'defined') | list }}"
+    loop_control:
+      label: "{{ item.name }} (vmid={{ item.vmid }})"
+    tags: [ preseed, wait, discover ]
+
+  - name: Fetch guest exec result - hostname -I
+    ansible.builtin.uri:
+      url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.item.vmid }}/agent/exec-status?pid={{ item.json.data.pid }}"
+      headers:
+        Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: 200
+    register: _exec_result
+    until: >
+      _exec_result.status == 200 and
+      _exec_result.json.data.exited | int == 1 and
+      _exec_result.json.data.get('out-data', '') | trim | length > 0
+    retries: 10
+    delay: 5
+    loop: "{{ _exec_start.results }}"
+    loop_control:
+      label: "{{ item.item.name }}"
+    when: item.status == 200
+    tags: [ preseed, wait, discover ]
+
+  - name: Store IPs discovered via guest exec
+    ansible.builtin.set_fact:
+      discovered_ips: >-
+        {{
+          discovered_ips | default({}) | combine({
+            item.item.item.name: item.json.data['out-data'].split()[0]
+          })
+        }}
+    loop: "{{ _exec_result.results | default([]) }}"
+    loop_control:
+      label: "{{ item.item.item.name }}"
+    when: not (item.skipped | default(false))
+    tags: [ preseed, wait, discover ]
+
+  - name: Print discovered IPs
+    ansible.builtin.debug:
+      msg: "{{ item.name }}: IP = {{ discovered_ips[item.name] }}"
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in (discovered_ips | default({}))
+    tags: [ preseed, wait ]
+
+  # ------------------------------------------------------------------ #
+  # Wait for SSH on each discovered IP
+  # (For guest-agent-discovered IPs the VM is already up, but SSH
+  #  may need a few extra seconds after the agent starts)
+  # ------------------------------------------------------------------ #
+  - name: Wait for SSH to respond on each VM
+    ansible.builtin.wait_for:
+      host: "{{ discovered_ips[item.name] }}"
+      port: 22
+      state: started
+      timeout: 120
+      msg: "SSH not responding on {{ item.name }} ({{ discovered_ips[item.name] }}) - guest agent reported IP but SSH is not up yet."
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }} ({{ discovered_ips[item.name] | default('no IP yet') }})"
+    when: item.name in (discovered_ips | default({}))
+    tags: [ preseed, wait ]
+
+  # Persist discovered_ips to a temp file so PLAY 3 can read it
+  # (facts do not cross play boundaries)
+  - name: Save discovered IPs to temp fact file
+    ansible.builtin.copy:
+      content: "{{ {'discovered_ips': discovered_ips} | to_json }}"
+      dest: "/tmp/preseed_discovered_ips.json"
+      mode: "0600"
+    tags: [ preseed, wait ]
+
+# ======================================================================
+# PLAY 3 - Verify ansible user SSH access + eject install media
+# ======================================================================
+- name: Verify ansible SSH access and eject install ISO
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  vars_files:
+  - group_vars/all/vms.yml
+  vars:
+    pm_node: "{{ lookup('env', 'PM_NODE') | default('starhaven', true) }}"
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST') | default('192.168.0.222', true) }}"
+    pm_api_user: "{{ lookup('env', 'PM_API_USER') | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID') | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+  tasks:
+  - name: Build list of preseed-install VMs
+    ansible.builtin.set_fact:
+      preseed_vms: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list }}"
+    tags: [ always ]
+
+  # Load the IPs discovered / defined in PLAY 2
+  - name: Load discovered IPs from temp fact file
+    ansible.builtin.set_fact:
+      discovered_ips: "{{ (lookup('file', '/tmp/preseed_discovered_ips.json') | from_json).discovered_ips }}"
+    tags: [ always ]
+
+  # Verify SSH + sudo for the ansible user on each VM
+  - name: Verify SSH + sudo for ansible user on each installed VM
+    ansible.builtin.command:
+      cmd: >
+        ssh -o StrictHostKeyChecking=no
+            -o BatchMode=yes
+            -o ConnectTimeout=10
+            -i ~/.ssh/id_rsa
+            {{ item.preseed_ansible_user | default(preseed_ansible_user) }}@{{ discovered_ips[item.name] }}
+            "sudo id"
+    register: _ssh_check
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in discovered_ips
+    changed_when: false
+    failed_when: _ssh_check.rc is defined and _ssh_check.rc != 0
+    tags: [ preseed, verify ]
+
+  - name: Print SSH verification results
+    ansible.builtin.debug:
+      msg: "ansible user SSH + sudo OK on {{ item.item.name }} ({{ discovered_ips[item.item.name] }})"
+    loop: "{{ _ssh_check.results }}"
+    loop_control:
+      label: "{{ item.item.name }}"
+    when: not item.skipped | default(false)
+    tags: [ preseed, verify ]
+
+  # Auto-update inventory/hosts.ini so setup-debian-base.yml can run without manual edits
+  - name: Ensure [new-debian-vms] section exists in inventory
+    ansible.builtin.lineinfile:
+      path: "{{ playbook_dir }}/inventory/hosts.ini"
+      line: "[new-debian-vms]"
+      state: present
+    tags: [ preseed, inventory ]
+
+  - name: Add discovered VMs to [new-debian-vms] in inventory
+    ansible.builtin.blockinfile:
+      path: "{{ playbook_dir }}/inventory/hosts.ini"
+      insertafter: "\\[new-debian-vms\\]"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK: {{ item.name }}"
+      block: |
+        {{ item.name }} ansible_host={{ discovered_ips[item.name] }} ansible_user={{ item.preseed_ansible_user | default(preseed_ansible_user) }} ansible_ssh_private_key_file={{ preseed_ssh_priv_key_file }}
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in discovered_ips
+    tags: [ preseed, inventory ]
+
+  # Eject the install ISO so the VM boots from disk on next start
+  - name: Eject install ISO from ide2 (so VM boots from disk)
+    community.proxmox.proxmox_disk:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.vmid }}"
+      disk: "ide2"
+      state: absent
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in discovered_ips
+    tags: [ preseed, eject ]
+
+  # Update boot order to disk-first so re-installs don't happen
+  - name: Set boot order to disk-first after install (scsi0 only)
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      boot: "order=scsi0;net0"
+      bootdisk: scsi0
+      update: true
+      state: present
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in discovered_ips
+    tags: [ preseed, eject ]
+
+  # Clean up temp fact file
+  - name: Remove temp IP fact file
+    ansible.builtin.file:
+      path: "/tmp/preseed_discovered_ips.json"
+      state: absent
+    tags: [ preseed, eject ]
+
+  - name: Print completion summary
+    ansible.builtin.debug:
+      msg:
+      - "========================================================"
+      - "Debian installation complete for: {{ item.name }}"
+      - "  IP:      {{ discovered_ips[item.name] }}"
+      - "  User:    {{ item.preseed_ansible_user | default(preseed_ansible_user) }}"
+      - "  SSH key: {{ preseed_ssh_pub_key_file }}"
+      - "inventory/hosts.ini has been updated automatically."
+      - "Next step:"
+      - "  ansible-playbook -i inventory/hosts.ini setup-debian-base.yml"
+      - "========================================================"
+    loop: "{{ preseed_vms }}"
+    loop_control:
+      label: "{{ item.name }}"
+    when: item.name in discovered_ips
+    tags: [ preseed, summary ]

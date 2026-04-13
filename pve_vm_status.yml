@@ -1,0 +1,296 @@
+# Proxmox Per-VM CPU and Memory Usage (API-First via community.proxmox)
+#
+# Overview
+#   Query and report live CPU and memory usage for all VMs and LXCs across one or more Proxmox nodes.
+#   Fully API-driven using the community.proxmox collection - no SSH or sudo on nodes required.
+#   Safe to run repeatedly; does not modify cluster state.
+#
+# What this playbook does
+#   * Collects all VM and LXC metadata via the Proxmox REST API
+#   * Filters out templates
+#   * Enriches each item with derived fields:
+#       - USED_Gi (used memory in GiB)
+#       - MAX_Gi  (configured memory in GiB)
+#       - USED_pct (percent of total)
+#       - CPU_pct (current CPU usage %)
+#       - vCPUs (configured vCPU count)
+#   * Sorts VMs (running first, then by USED_Gi descending)
+#   * Prints a clean, compact list - one line per VM/LXC plus overall totals
+#
+# Key features
+#   * Pure API flow - no Proxmox CLI calls, no SSH into nodes
+#   * Works from any Ansible control host with Proxmox API access
+#   * Nicely formatted human-readable output suitable for CI logs or terminal use
+#   * Supports multiple nodes when pm_node is omitted (auto-discovers all)
+#   * Idempotent and read-only
+#
+# Inputs & variables
+#   Proxmox API connection:
+#     pm_api_host, pm_api_port, api_user, api_token_id, api_token_secret,
+#     pm_api_validate_certs, pm_node (optional)
+#
+# Quick start
+#   1) Ensure Proxmox API token credentials are defined (vaulted or via env vars)
+#   2) Define pm_api_host, pm_node, etc. in group_vars/all/main.yml
+#   3) Run:
+#        ansible-playbook -i inventory/hosts.ini pve_vm_status.yml
+#
+# Notes & caveats
+#   * Requires collection: community.proxmox >= 1.3.0
+#   * Read-only - does not start, stop, or modify any VMs
+#   * For JSON or structured outputs, wrap in `-o json` callback or use `register` vars
+#
+# Credit: Thomas Mozdren
+
+---
+- name: Proxmox per-VM current usage status (mem + cpu via community.proxmox)
+  hosts: localhost
+  gather_facts: false
+
+  # module_defaults for the collection modules used below (keeps task calls concise)
+  module_defaults:
+    community.proxmox.proxmox_vm_info:
+      api_host: "{{ pm_api_host }}"
+      api_port: "{{ pm_api_port }}"
+      api_user: "{{ api_user }}"
+      api_token_id: "{{ api_token_id }}"
+      api_token_secret: "{{ api_token_secret | default(pm_api_token_secret) }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    community.proxmox.proxmox_node_info:
+      api_host: "{{ pm_api_host }}"
+      api_port: "{{ pm_api_port }}"
+      api_user: "{{ api_user }}"
+      api_token_id: "{{ api_token_id }}"
+      api_token_secret: "{{ api_token_secret | default(pm_api_token_secret) }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+
+  tasks:
+    - name: Get node(s) info (module returns all nodes; we filter locally)
+      community.proxmox.proxmox_node_info:
+        api_host: "{{ pm_api_host }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(pm_api_token_secret) }}"
+      register: node_info
+
+    - name: Fail if node_info contains no nodes
+      ansible.builtin.fail:
+        msg: "Proxmox API returned no nodes. Check API credentials / pm_api_host."
+      when: node_info.proxmox_nodes | default([]) | length == 0
+
+    - name: Initialize node RAM map (node -> max RAM GiB)
+      ansible.builtin.set_fact:
+        node_ram_map: {}
+      changed_when: false
+
+    - name: Build node_ram_map from node_info
+      ansible.builtin.set_fact:
+        node_ram_map: >-
+          {{ node_ram_map | combine({
+               (item.node | default('unknown')): ((item.maxmem | default(0) | int) / (1024.0**3)) | round(2)
+             }) }}
+      loop: "{{ node_info.proxmox_nodes | default([]) }}"
+      changed_when: false
+
+    - name: If pm_node specified - find that node record
+      ansible.builtin.set_fact:
+        pm_node_record: >-
+          {{ (node_info.proxmox_nodes | selectattr('node', 'equalto', pm_node) | list | first) | default({}) }}
+      when: pm_node is defined and pm_node | length > 0
+      changed_when: false
+
+    - name: Fail when pm_node specified but not found
+      ansible.builtin.fail:
+        msg: "pm_node '{{ pm_node }}' not found in Proxmox cluster. Discovered nodes: {{ node_info.proxmox_nodes | map(attribute='node') | list }}"
+      when:
+        - pm_node is defined
+        - pm_node | length > 0
+        - pm_node_record | length == 0
+
+    - name: Show discovered node RAM(s) or selected node
+      ansible.builtin.debug:
+        msg: >-
+          {% if pm_node is defined and pm_node | length > 0 %}
+          Node "{{ pm_node }}" host max RAM: {{ node_ram_map[pm_node] | default('UNKNOWN') }} GiB
+          {% else %}
+          Discovered nodes and host max RAM (GiB): {{ node_ram_map }}
+          {% endif %}
+
+    - name: Get VMs/LXCs (all nodes unless pm_node is defined)
+      community.proxmox.proxmox_vm_info:
+        api_host: "{{ pm_api_host }}"
+        api_port: "{{ pm_api_port }}"
+        api_user: "{{ api_user }}"
+        api_token_id: "{{ api_token_id }}"
+        api_token_secret: "{{ api_token_secret | default(pm_api_token_secret) }}"
+        validate_certs: "{{ pm_api_validate_certs }}"
+        type: all
+        node: "{{ pm_node if (pm_node | default('') | length > 0) else omit }}"
+        config: none
+      register: vm_info
+
+    - name: Start with an empty row list
+      ansible.builtin.set_fact:
+        vm_rows: []
+      changed_when: false
+
+    - name: Build enriched rows (filter out templates) - append per item
+      ansible.builtin.set_fact:
+        vm_rows: >-
+          {{ vm_rows
+             + [ item | combine({
+                   'USED_Gi':  (item.mem    | default(0) | float / 1073741824),
+                   'MAX_Gi':   (item.maxmem | default(0) | float / 1073741824),
+                   'USED_pct': ((item.maxmem | default(0) | float) > 0)
+                                | ternary( (item.mem | default(0) | float / (item.maxmem | float) * 100.0), 0.0),
+                   'CPU_pct':  (item.cpu | default(item.cpu) | float * 100.0),
+                   'vCPUs':    (item.maxcpu | default(item.cpus | default(0)))
+                 })
+               ]
+          }}
+      loop: >-
+        {{ (vm_info.proxmox_vms | default([]))
+           | rejectattr('template','equalto', true) | list }}
+      no_log: true
+      changed_when: false
+
+    - name: Order rows (running first, then by USED_Gi desc)
+      ansible.builtin.set_fact:
+        vm_sorted: >-
+          {{
+            (
+              (vm_rows | selectattr('status','equalto','running') | list)
+              | sort(attribute='USED_Gi', reverse=true)
+            )
+            +
+            (
+              (vm_rows | rejectattr('status','equalto','running') | list)
+              | sort(attribute='USED_Gi', reverse=true)
+            )
+          }}
+      changed_when: false
+
+    - name: Print simple list (one line per VM, then totals)
+      vars:
+        # prefer host-reported current used RAM if available, otherwise fall back to sum of guest USED_Gi
+        total_used_ram_gi: >-
+          {{ (node_current_ram_used is defined and node_current_ram_used | float > 0)
+             | ternary(node_current_ram_used | float, (vm_sorted | map(attribute='USED_Gi') | sum | default(0.0))) }}
+        total_max_ram_gi: "{{ node_ram_map[pm_node] | default(0.0) }}"
+        # used_pct_total is based on displayed total_used_ram_gi
+        used_pct_total: "{{ (total_max_ram_gi|float > 0) | ternary((total_used_ram_gi/total_max_ram_gi*100.0), 0.0) }}"
+        running_list: "{{ vm_sorted | selectattr('status', 'equalto', 'running') | list }}"
+        running_cpu_sum: "{{ running_list | map(attribute='CPU_pct') | list | sum | default(0.0) }}"
+        running_count: "{{ running_list | length | int }}"
+        avg_cpu_running: "{{ ((running_count | int) > 0) | ternary(running_cpu_sum / (running_count | int), 0.0) }}"
+      block:
+        - name: VM line (node/vmid  name  status  CPU%  RAMused/RAMmax)
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                "%s/%s  %-32s  %-7s  CPU:%5.1f%%  RAM: %.1fGi/%.1fGi (%.1f%%)" | format(
+                  item.node|default('-'),
+                  item.vmid|string,
+                  (item.name|default('-'))[:32],
+                  item.status|default('-'),
+                  item.CPU_pct|default(0.0),
+                  (item.mem / (1024.0**3)) | float | round(2),
+                  (item.maxmem / (1024.0**3)) | float | round(2),
+                  item.USED_pct|default(0.0)
+                )
+              }}
+          loop: "{{ vm_sorted }}"
+          loop_control:
+            label: "{{ item.node }}/{{ item.vmid }}"
+
+        - name: Get proxmox nodes current ram used
+          ansible.builtin.set_fact:
+            node_current_ram_used: >-
+              {%- if (pm_node is defined and pm_node | length > 0) -%}
+                {{ (
+                    (node_info.proxmox_nodes
+                      | selectattr('node','equalto', pm_node)
+                      | map(attribute='mem')
+                      | list
+                     )
+                     | first | default(0)
+                   ) / (1024.0**3) | float | round(2) }}
+              {%- else -%}
+                {{ (node_info.proxmox_nodes
+                     | map(attribute='mem')
+                     | sum
+                   ) / (1024.0**3) | float | round(2) }}
+              {%- endif -%}
+          changed_when: false
+
+        - name: Totals
+          ansible.builtin.debug:
+            msg: >-
+              {{
+                "Total: %d guests | Running: %d | Stopped: %d | RAM Used: %.1f Gi / %.1f Gi (%.1f%%) | Avg CPU (running): %.1f%%" |
+                format(
+                  (vm_sorted|length),
+                  running_count,
+                  ((vm_sorted|length) - running_count),
+                  total_used_ram_gi, total_max_ram_gi, used_pct_total,
+                  avg_cpu_running
+                )
+              }}
+
+    - name: Compute guests_max_bytes
+      ansible.builtin.set_fact:
+        guests_max_bytes: "{{ vm_info.proxmox_vms | default([]) | map(attribute='maxmem') | select('defined') | map('int') | sum }}"
+      changed_when: false
+
+    - name: Compute guests_max_gib
+      ansible.builtin.set_fact:
+        guests_max_gib: "{{ (guests_max_bytes / (1024.0**3)) | float | round(2) }}"
+      changed_when: false
+
+    - name: Build running/all MAX sums and running list (use maxmem bytes -> GiB)
+      ansible.builtin.set_fact:
+        running_list: "{{ vm_sorted | selectattr('status', 'equalto', 'running') | list }}"
+        running_max_sum: >-
+          {{ ( (vm_sorted
+                | selectattr('status','equalto','running')
+                | map(attribute='maxmem') | map('int') | sum
+              ) / (1024.0**3) ) | float | round(2) }}
+        all_max_sum: >-
+          {{ ((vm_sorted | map(attribute='maxmem') | map('int') | sum) / (1024.0**3)) | float | round(2) }}
+      changed_when: false
+
+
+    - name: If host_ram_gib explicitly provided in vars, use it
+      ansible.builtin.set_fact:
+        resolved_host_ram_gib: "{{ (host_ram_gib | float) }}"
+      when: host_ram_gib is defined
+
+    - name: Else if pm_node specified (and node_ram_map has entry) use node's API value
+      ansible.builtin.set_fact:
+        resolved_host_ram_gib: "{{ (node_ram_map[pm_node] | float) }}"
+      when:
+        - resolved_host_ram_gib is not defined
+        - pm_node is defined
+        - pm_node | length > 0
+
+    - name: Else fallback to conservative sum-of-all-guests MAXs
+      ansible.builtin.set_fact:
+        resolved_host_ram_gib: "{{ (all_max_sum | float) }}"
+      when: resolved_host_ram_gib is not defined
+
+    - name: Compute headroom and status facts
+      ansible.builtin.set_fact:
+        headroom_running: "{{ (resolved_host_ram_gib - running_max_sum) | round(2) }}"
+        headroom_all: "{{ (resolved_host_ram_gib - all_max_sum) | round(2) }}"
+        status_running: "{{ (resolved_host_ram_gib | float >= running_max_sum | float) | ternary('OK', 'TIGHT/RISK') }}"
+        status_all: "{{ (resolved_host_ram_gib | float >= all_max_sum | float) | ternary('OK', 'TIGHT/RISK') }}"
+      changed_when: false
+
+    - name: Show headroom summary (explicit and safe)
+      ansible.builtin.debug:
+        msg: |
+          Running guests: {{ running_list | length }}
+          Running MAX sum: {{ running_max_sum }} Gi
+          Headroom if all running at MAX: {{ headroom_running }} Gi | Status: {{ status_running }}
+          All guests: {{ vm_sorted | length }} | All MAX sum: {{ all_max_sum }} Gi
+          Headroom if all guests at MAX: {{ headroom_all }} Gi | Status: {{ status_all }}

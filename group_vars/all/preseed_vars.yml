@@ -1,0 +1,117 @@
+# Preseed & Base Setup Variables
+#
+# Overview
+#   Variables controlling automated Debian installation via the preseed system.
+#   These are used by:
+#     - build-debian-preseed-iso.yml  (ISO remastering)
+#     - auto-install-debian.yml       (VM boot + install wait)
+#     - setup-debian-base.yml         (post-install base packages)
+#
+# How to override
+#   Set any variable here in group_vars/all/main.yml (or host_vars) to override defaults.
+#
+# SSH key note
+#   preseed_ssh_pub_key reads your local ~/.ssh/id_rsa.pub by default.
+#   Change preseed_ssh_pub_key_file to point to a different public key file.
+#
+# Credit: Thomas Mozdren
+
+# -----------------------------------------------------------------------
+# Source Debian ISO (must already exist on the Proxmox node)
+# Run: ansible-playbook fetch-iso.yml first to download it.
+# -----------------------------------------------------------------------
+preseed_iso_src_file: "debian-13.1.0-amd64-netinst.iso"
+preseed_iso_url: "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/{{ preseed_iso_src_file }}"
+
+# Output filename of the remastered (preseed-injected) ISO
+preseed_iso_dest_file: "debian-13-amd64-preseed.iso"
+
+# ISO storage location on the Proxmox node
+preseed_iso_dir: "/var/lib/vz/template/iso"
+
+# -----------------------------------------------------------------------
+# Debian suite / mirror
+# -----------------------------------------------------------------------
+preseed_debian_suite: "trixie"
+preseed_mirror_host: "deb.debian.org"
+preseed_mirror_proxy: ""
+
+# -----------------------------------------------------------------------
+# Locale / keyboard / timezone
+# -----------------------------------------------------------------------
+preseed_locale: "en_US.UTF-8"
+preseed_keymap: "us"
+preseed_timezone: "UTC"
+
+# -----------------------------------------------------------------------
+# Hostname defaults (can be overridden per-VM in vms.yml via preseed_hostname)
+# -----------------------------------------------------------------------
+preseed_hostname: "debian-vm"
+preseed_domain: "lan"
+
+# -----------------------------------------------------------------------
+# Ansible user SSH key injection
+# This key is written to /home/ansible/.ssh/authorized_keys during install.
+# The ansible user will have NOPASSWD sudo and locked password (SSH key only).
+# -----------------------------------------------------------------------
+preseed_ssh_pub_key_file: "~/.ssh/id_rsa.pub"
+preseed_ssh_priv_key_file: "~/.ssh/id_rsa"
+preseed_ssh_pub_key: "{{ lookup('file', preseed_ssh_pub_key_file) }}"
+preseed_ansible_user: "ansible"
+
+# -----------------------------------------------------------------------
+# Extra packages to install during preseed (space-separated string).
+# Base packages (openssh-server, sudo, qemu-guest-agent, curl, wget, vim)
+# are always included. Add any extra ones here.
+# -----------------------------------------------------------------------
+preseed_extra_packages: ""
+
+# -----------------------------------------------------------------------
+# Base packages installed by setup-debian-base.yml after VM is up
+# -----------------------------------------------------------------------
+debian_base_packages:
+- htop
+- btop
+- vim
+- curl
+- wget
+- git
+- tmux
+- net-tools
+- bash-completion
+- unzip
+- jq
+- qemu-guest-agent
+
+# -----------------------------------------------------------------------
+# Auto-install timeout settings
+# How long to wait for Debian to install and SSH to become available.
+# Debian netinst downloads packages over the internet - allow plenty of time.
+# -----------------------------------------------------------------------
+# Seconds to wait for the VM to start booting before checking SSH
+preseed_boot_wait_seconds: 30
+# Max seconds to wait for SSH to become available after boot
+preseed_ssh_wait_timeout: 2400
+# Seconds between SSH availability checks
+preseed_ssh_wait_delay: 30
+
+# -----------------------------------------------------------------------
+# End-user account (created by setup-debian-base.yml)
+#
+# This is an interactive login account for actual VM use.
+# The 'ansible' user above is automation-only (locked password, no shell).
+#
+# Set vm_enduser_name to a username to enable creation, or leave it
+# empty ("") to skip end-user creation entirely.
+#
+# Password:
+#   Leave vm_enduser_password_hash unset for a locked password (SSH key only).
+#   To set a password, generate a hash and store it in vault:
+#     python3 -c "import crypt; print(crypt.crypt('yourpassword', crypt.mksalt(crypt.METHOD_SHA512)))"
+#   Then define in group_vars/all/main.yml (vault-encrypted):
+#     vm_enduser_password_hash: !vault | ...
+# -----------------------------------------------------------------------
+vm_enduser_name: "cartman"
+vm_enduser_groups: "sudo"
+vm_enduser_shell: "/bin/bash"
+vm_enduser_ssh_pub_key_file: "~/.ssh/id_rsa.pub"

@@ -1,0 +1,92 @@
+---
+# setup-ansibleuser.yml
+# Bootstrap playbook — run this ONCE per host before using update_upgrade.yml.
+# Connects as root to create ansibleuser, grant sudo, and deploy your SSH key.
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
+#     -u root --ask-pass
+#
+# If root uses a key:
+#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
+#     -u root --private-key ~/.ssh/id_rsa_root
+#
+# To target a single host only:
+#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
+#     -u root --ask-pass --limit lxc-prometheus
+
+- name: Bootstrap ansibleuser on all hosts
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    # Always connect as root for bootstrapping, regardless of inventory ansible_user
+    ansible_user: root
+    # Use root's SSH key — password auth not required if key auth is already set up
+    ansible_ssh_private_key_file: "~/.ssh/id_rsa"
+    # Hosts won't be in known_hosts yet; safe for a one-time bootstrap run
+    ansible_host_key_checking: false
+    ansible_user_name: ansibleuser
+    # Path to the PUBLIC key on your controller that will be deployed.
+    # Must match the private key set in hosts.ini (ansible_ssh_private_key_file).
+    ssh_public_key_file: "~/.ssh/id_rsa.pub"
+
+  tasks:
+
+  - name: Bootstrap python3 and sudo on Alpine (raw — runs before any module)
+    ansible.builtin.raw: |
+      if [ -f /etc/alpine-release ]; then
+        apk add --no-cache python3 sudo
+      fi
+    changed_when: false
+
+  - name: Ensure ansibleuser group exists
+    ansible.builtin.group:
+      name: "{{ ansible_user_name }}"
+      state: present
+
+  - name: Create ansibleuser
+    ansible.builtin.user:
+      name: "{{ ansible_user_name }}"
+      group: "{{ ansible_user_name }}"
+      # '*' = disabled password (allows key auth); avoids locked '!' on Alpine
+      password: "*"
+      shell: "{{ '/bin/ash' if ansible_os_family == 'Alpine' else '/bin/bash' }}"
+      home: "/home/{{ ansible_user_name }}"
+      create_home: true
+      state: present
+
+  - name: Grant ansibleuser passwordless sudo
+    ansible.builtin.copy:
+      dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+      content: "{{ ansible_user_name }} ALL=(ALL:ALL) NOPASSWD: ALL\n"
+      owner: root
+      group: root
+      mode: "0440"
+      validate: "visudo -cf %s"
+
+  - name: Ensure .ssh directory exists for ansibleuser
+    ansible.builtin.file:
+      path: "/home/{{ ansible_user_name }}/.ssh"
+      state: directory
+      owner: "{{ ansible_user_name }}"
+      group: "{{ ansible_user_name }}"
+      mode: "0700"
+
+  - name: Deploy SSH public key for ansibleuser
+    ansible.builtin.authorized_key:
+      user: "{{ ansible_user_name }}"
+      state: present
+      key: "{{ lookup('file', ssh_public_key_file) }}"
+
+  - name: Verify ansibleuser can sudo without password
+    ansible.builtin.command:
+      cmd: sudo -n true
+    become: true
+    become_user: "{{ ansible_user_name }}"
+    changed_when: false
+
+  - name: Done
+    ansible.builtin.debug:
+      msg: "ansibleuser is ready on {{ inventory_hostname }}"

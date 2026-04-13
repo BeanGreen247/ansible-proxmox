@@ -1,0 +1,325 @@
+# Create & Boot Proxmox VMs from ISO (Fully Automated * API-First)
+#
+# Overview
+#   End-to-end, idempotent VM provisioning on Proxmox using Ansible + Proxmox API only.
+#   No UI clicks. Safe to re-run. Great for CI/CD, cron, or one-liners.
+#
+# What this playbook does
+#   * PLAY (local via API): Build and prepare VM(s)
+#       - Creates VM "shells" (vmid, CPU/RAM, net0, agent, scsihw, etc.)
+#       - Creates/ensures system disk on scsi0 (size/storage/format)
+#       - Mounts the ISO as CD-ROM on ide2
+#       - Sets boot order (default: order=ide2;scsi0;net0, bootdisk=scsi0)
+#       - Optionally resizes scsi0 upward (grow-only guard; shrink is blocked)
+#       - (Tagged task) Removes VMs when requested
+#
+# Key features
+#   * Pure API flow via community.proxmox collection (no sudo on control host)
+#   * Multiple VMs supported via list in group_vars/all/vms.yml (merged with defaults)
+#   * Throttled API operations (throttle: 4) to avoid hammering the cluster
+#   * Clean idempotency (safe to re-apply without duplicate resources)
+#
+# Inputs & variables
+#   Proxmox API access (env or vars):
+#     pm_node, pm_api_host, pm_api_user, pm_api_token_id, pm_api_token_secret, pm_api_validate_certs
+#   ISO handling (PLAY 1):
+#     iso_dir, iso_url, iso_file
+#   VM definitions (group_vars/all/vms.yml), per-VM fields such as:
+#     name, vmid, memory, cores, sockets, net0, storage, format, scsihw, agent, onboot,
+#     iso_storage, iso_path, disk_size_gb, ostype, boot, bootdisk, ciuser, sshkeys, nameserver, searchdomain
+#   Defaults (override per-VM as needed):
+#     memory=1024, cores=1, sockets=1, net0="virtio,bridge=vmbr0", storage="local-lvm",
+#     format="qcow2", onboot=true, scsihw="virtio-scsi-pci", ciuser="ansibleuser",
+#     sshkeys (~/.ssh/id_rsa.pub), nameserver="192.168.0.1", searchdomain="lan"
+#
+# Task tags (use -t/--tags to target specific steps)
+#   createVMs   => Create/update VM shells
+#   createDisks => Create/ensure scsi0 system disks
+#   bootOrder   => Apply boot order/bootdisk
+#   diskResize  => Grow scsi0 when desired > current (shrink blocked)
+#   removeVMs   => Delete VMs (state=absent)
+#   updateVMs   => Update VMs (update VN config based on vms.yml changes)
+#
+# Quick start
+#   1) Create a Proxmox API token (e.g., root@pam + token ID/secret) with VM privileges.
+#   2) Define VM(s) in group_vars/all/vms.yml (see fields above).
+#   3) Put your Proxmox node under the [proxmox-bms] group in inventory/hosts.ini.
+#   4) Export API env vars or edit vars in this playbook.
+#   5) Run:
+#        ansible-playbook -i inventory/hosts.ini create-vm-from-iso-proxmox.yml --tags "createVMs,createDisks,mountIso,bootOrder"
+#
+# Notes & caveats
+#   * Disk shrink is not supported (guarded failure explains how to proceed).
+#   * PLAY 1 currently ensures a single ISO file on the node; VMs reference it via iso_storage:iso_path.
+#   * Validate certs can be disabled for labs (pm_api_validate_certs=false).
+#
+# Credit: Thomas Mozdren
+---
+# PLAY: call Proxmox API from the control node (no sudo)
+- name: Manage VMs via Proxmox API
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  # define vm parameters inside vms.yml
+  vars_files:
+  - group_vars/all/vms.yml
+  vars:
+    pm_node: "{{ lookup('env', 'PM_NODE') | default('starhaven', true) }}"
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST') | default('192.168.0.222', true) }}"
+    pm_api_user: "{{ lookup('env', 'PM_API_USER') | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID') | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+    # define VM defaults, othervise reference vms.yml
+    vm_defaults:
+      memory: 1024
+      cores: 1
+      sockets: 1
+      size_gb: 20
+      net0: "virtio,bridge=vmbr0"
+      storage: "local-lvm"
+      format: "qcow2"
+      agent: 1
+      boot: "order=ide2;scsi0;net0"
+      bootdisk: scsi0
+      onboot: true
+      ciuser: "ansibleuser"
+      sshkeys: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+      nameserver: "192.168.0.1"
+      searchdomain: "lan"
+      scsihw: "virtio-scsi-pci"
+
+  tasks:
+  # 0) Merging defaults into each vm
+  - name: Normalize/merge defaults into each VM item
+    ansible.builtin.set_fact:
+      vms_merged: "{{ vms }}"
+    tags: [ always ]
+
+  # 1) Create empty VM shells to update config later
+  - name: Create empty VM shells
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      memory: "{{ item.memory | default(vm_defaults.memory) }}"
+      cores: "{{ item.cores | default(vm_defaults.cores) }}"
+      sockets: "{{ item.sockets | default(vm_defaults.sockets) }}"
+      scsihw: "{{ item.scsihw | default(vm_defaults.scsihw) }}"
+      net:
+        net0: "{{ item.net0 | default(vm_defaults.net0) }}"
+      ostype: "{{ item.ostype }}"
+      agent: "{{ item.agent | default(vm_defaults.agent) }}"
+      onboot: "{{ item.onboot | default(vm_defaults.onboot) }}"
+      description: "{{ item.description | default('Managed by Ansible
+
+
+        Source: proxmox-ve-vms-ansible
+
+
+        Do not edit manually.') }}"
+      state: present
+      update: false
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    throttle: 4 # limit API pressure; tune as desired
+    tags: [ vms, createVMs ]
+
+  # 2) Create and or update the system disk (scsi0 on chosen storage)
+  - name: Create and or update system disks (scsi0)
+    community.proxmox.proxmox_disk:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.vmid }}"
+      disk: "{{ item.bootdisk | default(vm_defaults.bootdisk) }}"
+      storage: "{{ item.storage | default(vm_defaults.storage) }}"
+      size: "{{ item.disk_size_gb | default(vm_defaults.size_gb) }}"
+      state: present
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    throttle: 4
+    tags: [ disks, createDisks ]
+
+  # 3) Mount the ISO on ide2 as CD-ROM
+  - name: Mount ISO as CD-ROM (ide2)
+    vars:
+      iso_file_vm: "{{ item.iso_file }}"
+    community.proxmox.proxmox_disk:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.vmid }}"
+      disk: "ide2"
+      media: "cdrom"
+      iso_image: "{{ item.iso_storage }}:{{ item.iso_path }}{{ iso_file_vm }}"
+      state: present
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    throttle: 4
+    tags: [ mount, iso, mountIso ]
+
+  # 4) Set boot order only
+  - name: Set boot order from vms.yml (or default)
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      boot: "{{ item.boot | default(vm_defaults.boot) }}"
+      bootdisk: "{{ item.bootdisk | default(vm_defaults.bootdisk) }}"
+      update: true
+      state: present
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    throttle: 4
+    tags: [ boot, order, bootOrder ]
+
+  # 5a) Gather each VM's current disk size (bytes)
+  - name: Read VM info (for disk size compare)
+    community.proxmox.proxmox_vm_info:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.vmid }}"
+    loop: "{{ vms_merged }}"
+    register: vm_info_list
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ disks, resize, diskResize ]
+
+  # 5b) Guard against unsupported disk shrink (hard fail)
+  - name: Guard against unsupported disk shrink
+    vars:
+      desired_bytes: "{{ (item.0.disk_size_gb | default(vm_defaults.size_gb) | int) * 1073741824 }}"
+      current_bytes: "{{ (item.1.proxmox_vms[0].maxdisk | default(0) | int) }}"
+    ansible.builtin.fail:
+      msg: >-
+        !![[CUSTOM ERROR MESSAGE]]!! {{ item.0.name }} (vmid={{ item.0.vmid }}): requested disk_size_gb={{ item.0.disk_size_gb }}G is smaller than current size={{ (current_bytes | int // 1073741824) }}G. Shrinking is not supported by Proxmox/Ansible. Use the clone-to-smaller-disk flow. !![[CUSTOM ERROR MESSAGE]]!!
+    when: desired_bytes < current_bytes
+    loop: "{{ vms_merged | zip(vm_info_list.results) | list }}"
+    loop_control:
+      label: "{{ item.0.name }}"
+    tags: [ disks, resize, diskResize ]
+
+  # 5c) Resize scsi0 only if desired > current (grow only)
+  - name: Resize system disk when needed
+    community.proxmox.proxmox_disk:
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      vmid: "{{ item.0.vmid }}"
+      disk: "scsi0"
+      size: "{{ (item.0.disk_size_gb | default(vm_defaults.size_gb)) }}G"
+      state: resized
+    loop: "{{ vms_merged | zip(vm_info_list.results) | list }}"
+    loop_control:
+      label: "{{ item.0.name }}"
+    when: >
+      (
+        (item.0.disk_size_gb | default(vm_defaults.size_gb) | int) * 1073741824
+      ) > (
+        (item.1.proxmox_vms[0].maxdisk | default(0)) | int
+      )
+    throttle: 4
+    tags: [ disks, resize, diskResize ]
+
+  # remove VMs
+  # Stop the VM first (if running) - the DELETE API rejects running VMs
+  - name: Stop VMs before removal
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      state: stopped
+      force: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    failed_when: false   # VM may already be stopped
+    tags: [ never, rmvms, removeVMs ]
+
+  # Use the raw Proxmox API DELETE endpoint with destroy-unreferenced-disks=1
+  # because proxmox_kvm state=absent does NOT remove storage volumes by default.
+  - name: Removing VMs and all associated disks
+    ansible.builtin.uri:
+      url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.vmid }}?purge=1&destroy-unreferenced-disks=1"
+      method: DELETE
+      headers:
+        Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [200, 500]
+    register: _delete_result
+    failed_when: >
+      _delete_result.status not in [200, 500] or
+      (_delete_result.status == 500 and
+       'does not exist' not in (_delete_result.json.errors | default({}) | string))
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ never, rmvms, removeVMs ]
+
+  - name: Remove VMs from [new-debian-vms] inventory block
+    ansible.builtin.blockinfile:
+      path: "{{ playbook_dir }}/inventory/hosts.ini"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK: {{ item.name }}"
+      state: absent
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    tags: [ never, rmvms, removeVMs ]
+
+  # Update VMs
+  - name: Update VMs
+    community.proxmox.proxmox_kvm:
+      node: "{{ pm_node }}"
+      name: "{{ item.name }}"
+      vmid: "{{ item.vmid }}"
+      memory: "{{ item.memory | default(vm_defaults.memory) }}"
+      cores: "{{ item.cores | default(vm_defaults.cores) }}"
+      sockets: "{{ item.sockets | default(vm_defaults.sockets) }}"
+      scsihw: "{{ item.scsihw | default(vm_defaults.scsihw) }}"
+      net:
+        net0: "{{ item.net0 }}"
+      ostype: "{{ item.ostype }}"
+      agent: "{{ item.agent | default(vm_defaults.agent) }}"
+      onboot: "{{ item.onboot | default(vm_defaults.onboot) }}"
+      state: present
+      update: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ vms_merged }}"
+    loop_control:
+      label: "{{ item.name }}"
+    throttle: 4 # limit API pressure; tune as desired
+    tags: [ upvms, updateVMs ]

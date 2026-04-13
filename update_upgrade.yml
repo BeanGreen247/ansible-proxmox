@@ -1,0 +1,232 @@
+---
+# update_upgrade.yml
+# Detects the package manager on each host and runs the appropriate
+# update + upgrade. Supports apt (Debian/Ubuntu), apk (Alpine Linux),
+# dnf (RHEL/Fedora/CentOS), and pacman (Arch Linux).
+# Prints per-host upgrade counts and full command output.
+
+- name: Update and upgrade all LXC containers and VMs
+  hosts: all
+  gather_facts: true
+  gather_subset:
+  - pkg_mgr
+  - distribution
+  become: true
+
+  tasks:
+
+  #  APT  (Debian / Ubuntu)
+
+  - name: "[apt] Update package cache"
+    ansible.builtin.apt:
+      update_cache: true
+      cache_valid_time: 0 # always refresh
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[apt] Collect upgradable package list (apt-get --simulate)"
+    ansible.builtin.command:
+      cmd: apt-get dist-upgrade --simulate --quiet=2
+    register: apt_simulate
+    changed_when: false
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[apt] Run dist-upgrade"
+    ansible.builtin.apt:
+      upgrade: dist
+      autoremove: true
+      autoclean: true
+    register: apt_upgrade_result
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[apt] Show upgrade summary"
+    ansible.builtin.debug:
+      msg: |
+        Host           : {{ inventory_hostname }}
+        OS             : {{ ansible_distribution }} {{ ansible_distribution_version }}
+        Packages upgraded: {{ apt_upgrade_result.stdout | default('') | regex_findall('upgraded') | length }}
+
+        --- apt-get dist-upgrade output (simulated) ---
+        {{ apt_simulate.stdout | default('(none)') }}
+
+        --- apt upgrade result ---
+        {{ apt_upgrade_result.stdout | default('(no output)') }}
+    when: ansible_pkg_mgr == "apt"
+
+  #  APK  (Alpine Linux)
+
+  - name: "[apk] Update package index"
+    ansible.builtin.command:
+      cmd: apk update
+    register: apk_update_result
+    changed_when: false
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[apk] Collect upgradable packages (apk upgrade --simulate)"
+    ansible.builtin.command:
+      cmd: apk upgrade --simulate
+    register: apk_simulate
+    changed_when: false
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[apk] Run upgrade"
+    ansible.builtin.command:
+      cmd: apk upgrade
+    register: apk_upgrade_result
+    changed_when: "'Upgrading' in apk_upgrade_result.stdout or 'Installing' in apk_upgrade_result.stdout"
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[apk] Show upgrade summary"
+    ansible.builtin.debug:
+      msg: |
+        Host              : {{ inventory_hostname }}
+        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
+        Packages upgraded : {{ apk_simulate.stdout_lines | select('match', '^\\(\\d+/\\d+\\)') | list | length }}
+
+        --- apk update output ---
+        {{ apk_update_result.stdout | default('(none)') }}
+
+        --- apk upgrade --simulate output ---
+        {{ apk_simulate.stdout | default('(none)') }}
+
+        --- apk upgrade output ---
+        {{ apk_upgrade_result.stdout | default('(no output)') }}
+    when: ansible_pkg_mgr == "apk"
+
+  #  DNF  (RHEL / Fedora / CentOS Stream)
+
+  - name: "[dnf] Update package cache"
+    ansible.builtin.command:
+      cmd: dnf makecache --quiet
+    register: dnf_makecache_result
+    changed_when: false
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[dnf] Check for available upgrades (dnf check-update)"
+    ansible.builtin.command:
+      cmd: dnf check-update --quiet
+    register: dnf_check
+    # dnf check-update exits 100 when updates are available, 0 when none
+    changed_when: false
+    failed_when: dnf_check.rc not in [0, 100]
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[dnf] Run upgrade"
+    ansible.builtin.dnf:
+      name: "*"
+      state: latest
+      autoremove: true
+    register: dnf_upgrade_result
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[dnf] Show upgrade summary"
+    ansible.builtin.debug:
+      msg: |
+        Host              : {{ inventory_hostname }}
+        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
+        Packages upgraded : {{ dnf_upgrade_result.results | default([]) | length }}
+
+        --- dnf makecache output ---
+        {{ dnf_makecache_result.stdout | default('(none)') }}
+
+        --- dnf check-update output ---
+        {{ dnf_check.stdout | default('(none)') }}
+
+        --- dnf upgrade result ---
+        {{ dnf_upgrade_result.results | default(['(no output)']) | join('\n') }}
+    when: ansible_pkg_mgr == "dnf"
+
+  #  PACMAN  (Arch Linux)
+
+  - name: "[pacman] Sync package database"
+    ansible.builtin.command:
+      cmd: pacman -Sy --noconfirm
+    register: pacman_sync_result
+    changed_when: false
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[pacman] Collect upgradable packages (pacman -Qu)"
+    ansible.builtin.command:
+      cmd: pacman -Qu
+    register: pacman_simulate
+    changed_when: false
+    # pacman -Qu exits 1 when no updates are available
+    failed_when: pacman_simulate.rc not in [0, 1]
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[pacman] Run system upgrade"
+    ansible.builtin.command:
+      cmd: pacman -Su --noconfirm
+    register: pacman_upgrade_result
+    changed_when: "'upgraded' in pacman_upgrade_result.stdout"
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[pacman] Show upgrade summary"
+    ansible.builtin.debug:
+      msg: |
+        Host              : {{ inventory_hostname }}
+        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
+        Packages upgraded : {{ pacman_simulate.stdout_lines | default([]) | length }}
+
+        --- pacman -Sy output ---
+        {{ pacman_sync_result.stdout | default('(none)') }}
+
+        --- pacman -Qu output (upgradable) ---
+        {{ pacman_simulate.stdout | default('(none — already up to date)') }}
+
+        --- pacman -Su output ---
+        {{ pacman_upgrade_result.stdout | default('(no output)') }}
+    when: ansible_pkg_mgr == "pacman"
+
+  #  Unsupported package manager — warn and skip
+
+  - name: "Warn on unsupported package manager"
+    ansible.builtin.debug:
+      msg: >
+        Host {{ inventory_hostname }} uses '{{ ansible_pkg_mgr }}' which is not handled by this playbook. Skipping.
+    when: ansible_pkg_mgr not in ["apt", "apk", "dnf", "pacman"]
+
+  #  Reboot handling
+
+  - name: "Check if reboot is required (apt)"
+    ansible.builtin.stat:
+      path: /var/run/reboot-required
+    register: reboot_required_file
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "Check if reboot is required (apk/Alpine)"
+    ansible.builtin.command:
+      cmd: ash -c "[ -f /var/run/reboot-required ] && echo yes || echo no"
+    register: alpine_reboot_check
+    changed_when: false
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "Set reboot_needed fact"
+    ansible.builtin.set_fact:
+      reboot_needed: >-
+        {{
+          (ansible_pkg_mgr == "apt" and reboot_required_file.stat.exists) or
+          (ansible_pkg_mgr == "apk" and alpine_reboot_check.stdout | default('no') == 'yes')
+        }}
+
+  - name: "Schedule delayed reboot after 16:00 (vm-debian-remote-desktop only)"
+    ansible.builtin.command:
+      cmd: shutdown -r 16:00 "Scheduled reboot by Ansible after package upgrade"
+    when:
+    - reboot_needed
+    - inventory_hostname == "vm-debian-remote-desktop"
+    changed_when: true
+
+  - name: "Reboot immediately if required (all other hosts)"
+    ansible.builtin.reboot:
+      msg: "Rebooting after package upgrade"
+      reboot_timeout: 300
+    when:
+    - reboot_needed
+    - inventory_hostname != "vm-debian-remote-desktop"
+
+  - name: "Report reboot status"
+    ansible.builtin.debug:
+      msg: >-
+        {{ inventory_hostname }}: {{ 'REBOOT SCHEDULED after 16:00' if inventory_hostname == 'vm-debian-remote-desktop' and reboot_needed
+            else 'REBOOTED' if reboot_needed
+            else 'no reboot needed' }}

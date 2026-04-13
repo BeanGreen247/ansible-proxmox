@@ -1,0 +1,35 @@
+kenny@Nebula:~/git/proxmox-ve-vms-ansible$ ansible-playbook -i inventory/hosts.ini create-vm-from-iso-proxmox.yml \
+  --tags "createVMs,createDisks,mountIso,bootOrder"
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+
+PLAY [Manage VMs via Proxmox API] ************************************************************************************************************************************************************
+
+TASK [Normalize/merge defaults into each VM item] ********************************************************************************************************************************************
+ok: [localhost]
+
+TASK [Create empty VM shells] ****************************************************************************************************************************************************************
+ok: [localhost] => (item=ansible-debian-vm)
+ok: [localhost] => (item=ansible-rhel-vm)
+ok: [localhost] => (item=ansible-win10-vm)
+ok: [localhost] => (item=dev-debian-01)
+
+TASK [Create and or update system disks (scsi0)] *********************************************************************************************************************************************
+ok: [localhost] => (item=ansible-debian-vm)
+ok: [localhost] => (item=ansible-rhel-vm)
+ok: [localhost] => (item=ansible-win10-vm)
+ok: [localhost] => (item=dev-debian-01)
+
+TASK [Mount ISO as CD-ROM (ide2)] ************************************************************************************************************************************************************
+ok: [localhost] => (item=ansible-debian-vm)
+ok: [localhost] => (item=ansible-rhel-vm)
+ok: [localhost] => (item=ansible-win10-vm)
+changed: [localhost] => (item=dev-debian-01)
+
+TASK [Set boot order from vms.yml (or default)] **********************************************************************************************************************************************
+changed: [localhost] => (item=ansible-debian-vm)
+changed: [localhost] => (item=ansible-rhel-vm)
+changed: [localhost] => (item=ansible-win10-vm)
+changed: [localhost] => (item=dev-debian-01)
+
+PLAY RECAP ***************************************************************************************
+localhost                  : ok=5    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0

@@ -1,0 +1,185 @@
+# Setup Debian Base - Post-Install Package & Config Baseline
+#
+# Overview
+#   Runs on freshly installed Debian VMs (provisioned via the preseed system)
+#   to install the minimal tool set, harden SSH config, and confirm the system
+#   is ready for further Ansible-driven configuration.
+#   Designed to be idempotent - safe to re-run at any time.
+#
+# What this playbook does
+#   * PLAY 1 (remote - target VMs): Install base packages and harden basics
+#       - Updates the APT package index
+#       - Upgrades all packages to latest versions (safe-upgrade)
+#       - Installs the base tool set (htop, btop, vim, curl, wget, git, ...)
+#       - Sets vim as the default system editor
+#       - Ensures qemu-guest-agent is running (needed for Proxmox IP discovery)
+#       - Ensures SSH PasswordAuthentication is off (key-only)
+#       - Ensures sudo is configured for the ansible user (NOPASSWD)
+#       - Prints a per-host confirmation summary
+#
+# Target hosts
+#   Add newly installed VMs to [new-debian-vms] in inventory/hosts.ini, OR
+#   pass hosts via --limit:
+#     ansible-playbook -i inventory/hosts.ini setup-debian-base.yml \
+#       --limit "192.168.0.50,192.168.0.51"
+#
+# Key variables (group_vars/all/preseed_vars.yml)
+#   debian_base_packages     List of packages to install (see preseed_vars.yml)
+#   preseed_ansible_user     SSH user (default: ansible)
+#
+# Quick start (after auto-install-debian.yml completes)
+#   1) Add the VM IP to inventory/hosts.ini under [new-debian-vms]
+#   2) Run:
+#        ansible-playbook -i inventory/hosts.ini setup-debian-base.yml
+#   Or target directly:
+#        ansible-playbook -i inventory/hosts.ini setup-debian-base.yml \
+#          --limit "192.168.0.50"
+#
+# Credit: Thomas Mozdren
+---
+- name: Install base packages and harden Debian VM baseline
+  hosts: new-debian-vms
+  become: true
+  gather_facts: true
+
+  vars:
+    _ansible_user: "{{ preseed_ansible_user | default('ansible') }}"
+
+  tasks:
+
+  # ------------------------------------------------------------------ #
+  # 0) Update APT cache and upgrade existing packages
+  # ------------------------------------------------------------------ #
+  - name: Update APT package index
+    ansible.builtin.apt:
+      update_cache: true
+      cache_valid_time: 3600
+    tags: [ base, apt ]
+
+  - name: Upgrade all packages to latest (safe-upgrade)
+    ansible.builtin.apt:
+      upgrade: safe
+    register: _apt_upgrade
+    tags: [ base, apt, upgrade ]
+
+  # ------------------------------------------------------------------ #
+  # 1) Install base packages
+  # ------------------------------------------------------------------ #
+  - name: Install base tool set
+    ansible.builtin.apt:
+      name: "{{ debian_base_packages }}"
+      state: present
+    tags: [ base, packages ]
+
+  # ------------------------------------------------------------------ #
+  # 2) Set vim as the default editor system-wide
+  # ------------------------------------------------------------------ #
+  - name: Set vim as default editor (update-alternatives)
+    community.general.alternatives:
+      name: editor
+      path: /usr/bin/vim.basic
+    tags: [ base, config ]
+
+  # ------------------------------------------------------------------ #
+  # 3) Ensure qemu-guest-agent is enabled and running
+  #    Required for Proxmox to detect IP + issue clean shutdown signals
+  # ------------------------------------------------------------------ #
+  - name: Ensure qemu-guest-agent is enabled and started
+    ansible.builtin.service:
+      name: qemu-guest-agent
+      state: started
+      enabled: true
+    tags: [ base, services, qemu ]
+
+  # ------------------------------------------------------------------ #
+  # 4) Harden SSH: disable password authentication (key-only)
+  # ------------------------------------------------------------------ #
+  - name: Disable SSH password authentication
+    ansible.builtin.lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PasswordAuthentication'
+      line: 'PasswordAuthentication no'
+      validate: '/usr/sbin/sshd -t -f %s'
+    notify: Restart sshd
+    tags: [ base, ssh, security ]
+
+  - name: Disable SSH challenge-response authentication
+    ansible.builtin.lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?ChallengeResponseAuthentication'
+      line: 'ChallengeResponseAuthentication no'
+      validate: '/usr/sbin/sshd -t -f %s'
+    notify: Restart sshd
+    tags: [ base, ssh, security ]
+
+  - name: Ensure SSH PublicKeyAuthentication is enabled
+    ansible.builtin.lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PubkeyAuthentication'
+      line: 'PubkeyAuthentication yes'
+      validate: '/usr/sbin/sshd -t -f %s'
+    notify: Restart sshd
+    tags: [ base, ssh, security ]
+
+  # ------------------------------------------------------------------ #
+  # 5) Confirm sudoers entry for ansible user (idempotent)
+  # ------------------------------------------------------------------ #
+  - name: Ensure ansible user sudoers file is correct
+    ansible.builtin.copy:
+      content: "{{ _ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+      dest: "/etc/sudoers.d/{{ _ansible_user }}"
+      owner: root
+      group: root
+      mode: "0440"
+      validate: "/usr/sbin/visudo -cf %s"
+    tags: [ base, sudo ]
+
+  # ------------------------------------------------------------------ #
+  # 6) End-user account (optional)
+  #    Set vm_enduser_name in preseed_vars.yml to enable.
+  #    This creates the interactive login account for day-to-day VM use.
+  #    The 'ansible' user is automation-only and is never used for logins.
+  # ------------------------------------------------------------------ #
+  - name: Create end-user account
+    ansible.builtin.user:
+      name: "{{ vm_enduser_name }}"
+      groups: "{{ vm_enduser_groups }}"
+      append: true
+      shell: "{{ vm_enduser_shell }}"
+      create_home: true
+      password: "{{ vm_enduser_password_hash | default('!') }}"
+    when: vm_enduser_name | default('') | length > 0
+    tags: [ base, users ]
+
+  - name: Set SSH authorized key for end-user
+    ansible.posix.authorized_key:
+      user: "{{ vm_enduser_name }}"
+      key: "{{ lookup('file', vm_enduser_ssh_pub_key_file) }}"
+      state: present
+    when: >
+      vm_enduser_name | default('') | length > 0 and vm_enduser_ssh_pub_key_file | default('') | length > 0
+    tags: [ base, users ]
+
+  # ------------------------------------------------------------------ #
+  # 7) Summary
+  # ------------------------------------------------------------------ #
+  - name: Print base setup summary
+    ansible.builtin.debug:
+      msg:
+      - "========================================================"
+      - "Base setup complete on: {{ inventory_hostname }}"
+      - "  Hostname:     {{ ansible_hostname }}"
+      - "  OS:           {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      - "  Kernel:       {{ ansible_kernel }}"
+      - "  Packages upgraded: {{ _apt_upgrade.changed | ternary('yes', 'no (already up to date)') }}"
+      - "  SSH:          password auth OFF, key-only"
+      - "  Ansible user: {{ _ansible_user }} (NOPASSWD sudo, automation only)"
+      - "  End-user:     {{ vm_enduser_name | default('') | ternary(vm_enduser_name + ' (groups: ' + vm_enduser_groups + ')', 'none configured') }}"
+      - "========================================================"
+    tags: [ base, summary ]
+
+  handlers:
+  - name: Restart sshd
+    ansible.builtin.service:
+      name: sshd
+      state: restarted
