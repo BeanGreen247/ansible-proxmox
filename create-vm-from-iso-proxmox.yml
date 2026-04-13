@@ -112,13 +112,7 @@
       ostype: "{{ item.ostype }}"
       agent: "{{ item.agent | default(vm_defaults.agent) }}"
       onboot: "{{ item.onboot | default(vm_defaults.onboot) }}"
-      description: "{{ item.description | default('Managed by Ansible
-
-
-        Source: proxmox-ve-vms-ansible
-
-
-        Do not edit manually.') }}"
+      description: "{{ item.description | default('Managed by Ansible\n\nSource: [BeanGreen247/ansible-proxmox](https://github.com/BeanGreen247/ansible-proxmox)\n\nDo not edit manually.') }}"
       state: present
       update: false
       api_host: "{{ pm_api_host }}"

@@ -712,4 +712,3 @@ ansible-galaxy collection install -r collections/requirements.yml -p ./collectio
 ---
 
 *Built and maintained by Thomas Mozdren — 2026*
-|---|---|

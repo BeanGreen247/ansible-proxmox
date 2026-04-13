@@ -668,3 +668,7 @@ The discovered IP is stored in `inventory/hosts.ini` automatically under `[new-d
 | `preseed_ssh_wait_delay` | `preseed_vars.yml` | `30` | Polling interval in seconds |
 | `preseed_boot_wait_seconds` | `preseed_vars.yml` | `30` | Seconds to wait after VM power-on before polling guest agent |
 | `debian_base_packages` | `preseed_vars.yml` | `htop btop vim ...` | Packages installed by setup-debian-base.yml |
+
+---
+
+*Built and maintained by Thomas Mozdren — 2026*

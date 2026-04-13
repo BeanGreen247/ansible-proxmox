@@ -701,6 +701,4 @@ ansible-playbook -i inventory/hosts.ini deploy-nginx.yml    # or your own playbo
 
 ---
 
-## Credit
-
-Thomas Mozdren, 2026
+*Built and maintained by Thomas Mozdren — 2026*
