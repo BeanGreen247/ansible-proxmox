@@ -25,7 +25,9 @@
 
   - name: "[apt] Collect upgradable package list (apt-get --simulate)"
     ansible.builtin.command:
-      cmd: apt-get dist-upgrade --simulate --quiet=2
+      # -q suppresses progress noise but keeps Inst/Conf lines WITH [old-ver] brackets.
+      # --quiet=2 strips the brackets, losing the old version — do not use it here.
+      cmd: apt-get dist-upgrade --simulate -q
     register: apt_simulate
     changed_when: false
     when: ansible_pkg_mgr == "apt"
@@ -36,20 +38,6 @@
       autoremove: true
       autoclean: true
     register: apt_upgrade_result
-    when: ansible_pkg_mgr == "apt"
-
-  - name: "[apt] Show upgrade summary"
-    ansible.builtin.debug:
-      msg: |
-        Host           : {{ inventory_hostname }}
-        OS             : {{ ansible_distribution }} {{ ansible_distribution_version }}
-        Packages upgraded: {{ apt_upgrade_result.stdout | default('') | regex_findall('upgraded') | length }}
-
-        --- apt-get dist-upgrade output (simulated) ---
-        {{ apt_simulate.stdout | default('(none)') }}
-
-        --- apt upgrade result ---
-        {{ apt_upgrade_result.stdout | default('(no output)') }}
     when: ansible_pkg_mgr == "apt"
 
   #  APK  (Alpine Linux)
@@ -73,23 +61,6 @@
       cmd: apk upgrade
     register: apk_upgrade_result
     changed_when: "'Upgrading' in apk_upgrade_result.stdout or 'Installing' in apk_upgrade_result.stdout"
-    when: ansible_pkg_mgr == "apk"
-
-  - name: "[apk] Show upgrade summary"
-    ansible.builtin.debug:
-      msg: |
-        Host              : {{ inventory_hostname }}
-        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
-        Packages upgraded : {{ apk_simulate.stdout_lines | select('match', '^\\(\\d+/\\d+\\)') | list | length }}
-
-        --- apk update output ---
-        {{ apk_update_result.stdout | default('(none)') }}
-
-        --- apk upgrade --simulate output ---
-        {{ apk_simulate.stdout | default('(none)') }}
-
-        --- apk upgrade output ---
-        {{ apk_upgrade_result.stdout | default('(no output)') }}
     when: ansible_pkg_mgr == "apk"
 
   #  DNF  (RHEL / Fedora / CentOS Stream)
@@ -118,23 +89,6 @@
     register: dnf_upgrade_result
     when: ansible_pkg_mgr == "dnf"
 
-  - name: "[dnf] Show upgrade summary"
-    ansible.builtin.debug:
-      msg: |
-        Host              : {{ inventory_hostname }}
-        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
-        Packages upgraded : {{ dnf_upgrade_result.results | default([]) | length }}
-
-        --- dnf makecache output ---
-        {{ dnf_makecache_result.stdout | default('(none)') }}
-
-        --- dnf check-update output ---
-        {{ dnf_check.stdout | default('(none)') }}
-
-        --- dnf upgrade result ---
-        {{ dnf_upgrade_result.results | default(['(no output)']) | join('\n') }}
-    when: ansible_pkg_mgr == "dnf"
-
   #  PACMAN  (Arch Linux)
 
   - name: "[pacman] Sync package database"
@@ -158,23 +112,6 @@
       cmd: pacman -Su --noconfirm
     register: pacman_upgrade_result
     changed_when: "'upgraded' in pacman_upgrade_result.stdout"
-    when: ansible_pkg_mgr == "pacman"
-
-  - name: "[pacman] Show upgrade summary"
-    ansible.builtin.debug:
-      msg: |
-        Host              : {{ inventory_hostname }}
-        OS                : {{ ansible_distribution }} {{ ansible_distribution_version }}
-        Packages upgraded : {{ pacman_simulate.stdout_lines | default([]) | length }}
-
-        --- pacman -Sy output ---
-        {{ pacman_sync_result.stdout | default('(none)') }}
-
-        --- pacman -Qu output (upgradable) ---
-        {{ pacman_simulate.stdout | default('(none — already up to date)') }}
-
-        --- pacman -Su output ---
-        {{ pacman_upgrade_result.stdout | default('(no output)') }}
     when: ansible_pkg_mgr == "pacman"
 
   #  Unsupported package manager — warn and skip
@@ -230,3 +167,212 @@
         {{ inventory_hostname }}: {{ 'REBOOT SCHEDULED after 16:00' if inventory_hostname == 'vm-debian-remote-desktop' and reboot_needed
             else 'REBOOTED' if reboot_needed
             else 'no reboot needed' }}
+
+  # ------------------------------------------------------------------ #
+  # SUMMARY — per-host upgrade report
+  # ------------------------------------------------------------------ #
+
+  - name: "[summary] Get root filesystem free space"
+    ansible.builtin.shell:
+      cmd: df -h / | awk 'NR==2 {print $4}'
+    register: _df_avail
+    changed_when: false
+
+  # APT: parse the simulate dry-run output directly.
+  # Format: Inst pkg [old-ver] (new-ver repo [arch])   <- upgrade (has [old])
+  #         Inst pkg (new-ver repo [arch]) []           <- new install (no [old])
+  # We only want upgrade lines where $3 starts with '[' — the old version.
+  # Written to a temp file via copy module to avoid heredoc + pipelining conflicts
+  # (pipelining = True in ansible.cfg causes 'python3 - << EOF' stdin collisions).
+  - name: "[summary] APT — write simulate output to temp file"
+    ansible.builtin.copy:
+      content: "{{ apt_simulate.stdout | default('') }}"
+      dest: /tmp/_ansible_apt_sim.txt
+      mode: "0600"
+    changed_when: false
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[summary] APT — extract per-package version changes from simulate output"
+    ansible.builtin.shell:
+      cmd: |
+        awk '/^Inst / && $3 ~ /^\[/ {
+          n=$2; sub(/:.*/, "", n)
+          old=$3; gsub(/[\[\]]/, "", old)
+          new=$4; gsub(/[()]/, "", new)
+          if (!(n in seen)) { seen[n]=1; printf "  %-36s %s  ->  %s\n", n, old, new }
+        }
+        END { if (length(seen)==0) print "  (none - already up to date)" }' \
+        /tmp/_ansible_apt_sim.txt
+    register: _apt_versions
+    changed_when: false
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[summary] APT — cleanup simulate temp file"
+    ansible.builtin.file:
+      path: /tmp/_ansible_apt_sim.txt
+      state: absent
+    when: ansible_pkg_mgr == "apt"
+
+  - name: "[summary] APT — set summary facts"
+    ansible.builtin.set_fact:
+      _pkg_versions: "{{ _apt_versions.stdout | default('  (none)') }}"
+      _pkg_count: "{{ _apt_versions.stdout_lines | default([]) | select('search', '->') | list | length }}"
+      # simulate -q (not -qq) includes the 'Need to get X MB' line
+      _upgrade_size: >-
+        {{ apt_simulate.stdout | default('')
+           | regex_findall('Need to get ([0-9.,]+ [kMGTP]?B)')
+           | first | default('N/A') }}
+    when: ansible_pkg_mgr == "apt"
+
+  # APK: parse the real upgrade output (contains old → new per package)
+  - name: "[summary] APK — write upgrade output to temp file"
+    ansible.builtin.copy:
+      content: "{{ apk_upgrade_result.stdout | default('') }}"
+      dest: /tmp/_ansible_apk_upgrade.txt
+      mode: "0600"
+    changed_when: false
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[summary] APK — extract per-package version changes"
+    ansible.builtin.shell:
+      cmd: |
+        awk '/Upgrading/ {
+          name=$3
+          old=$4; gsub(/[()]/, "", old)
+          new=$6; gsub(/[()]/, "", new)
+          count++
+          printf "  %-36s %s  ->  %s\n", name, old, new
+        }
+        END { if (count == 0) print "  (none — already up to date)" }' \
+        /tmp/_ansible_apk_upgrade.txt
+    register: _apk_versions
+    changed_when: false
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[summary] APK — cleanup temp file"
+    ansible.builtin.file:
+      path: /tmp/_ansible_apk_upgrade.txt
+      state: absent
+    when: ansible_pkg_mgr == "apk"
+
+  - name: "[summary] APK — set summary facts"
+    ansible.builtin.set_fact:
+      _pkg_versions: "{{ _apk_versions.stdout | default('  (none)') }}"
+      _pkg_count: "{{ _apk_versions.stdout_lines | default([]) | select('search', '->') | list | length }}"
+      _upgrade_size: "N/A"
+    when: ansible_pkg_mgr == "apk"
+
+  # DNF: write Python script via copy module then execute.
+  # Avoids pipelining+heredoc stdin collision (pipelining=True in ansible.cfg).
+  - name: "[summary] DNF — write version diff script"
+    ansible.builtin.copy:
+      dest: /tmp/_ansible_dnf_diff.py
+      mode: "0700"
+      content: |
+        import subprocess, re, sys
+        out = subprocess.run(['dnf','history','info','last'], capture_output=True, text=True).stdout
+        upgraded, upgrade, state = {}, {}, None
+        for line in out.splitlines():
+            ls = line.strip()
+            if ls.startswith('Upgraded') and ':' in ls: state = 'old'; continue
+            if ls.startswith('Upgrade') and 'Upgraded' not in ls and ':' in ls: state = 'new'; continue
+            if state and ls and not ls[0].isupper() and not ls.startswith('<'):
+                m = re.match(r'^(.+)-(\d[^-]+-[^-.]+)\.\w+$', ls)
+                if m:
+                    (upgraded if state == 'old' else upgrade)[m.group(1)] = m.group(2)
+        if not upgrade:
+            print('  (none - already up to date)')
+        else:
+            for n in sorted(upgrade):
+                print(f'  {n:<36} {upgraded.get(n,"?")}  ->  {upgrade[n]}')
+    changed_when: false
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[summary] DNF — extract per-package version changes"
+    ansible.builtin.command:
+      cmd: python3 /tmp/_ansible_dnf_diff.py
+    register: _dnf_versions
+    changed_when: false
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[summary] DNF — cleanup script"
+    ansible.builtin.file:
+      path: /tmp/_ansible_dnf_diff.py
+      state: absent
+    when: ansible_pkg_mgr == "dnf"
+
+  - name: "[summary] DNF — set summary facts"
+    ansible.builtin.set_fact:
+      _pkg_versions: "{{ _dnf_versions.stdout | default('  (none)') }}"
+      _pkg_count: "{{ _dnf_versions.stdout_lines | default([]) | select('search', '->') | list | length }}"
+      _upgrade_size: "N/A"
+    when: ansible_pkg_mgr == "dnf"
+
+  # Pacman: write Python script via copy module then execute.
+  # Avoids pipelining+heredoc stdin collision (pipelining=True in ansible.cfg).
+  - name: "[summary] Pacman — write version diff script"
+    ansible.builtin.copy:
+      dest: /tmp/_ansible_pac_diff.py
+      mode: "0700"
+      content: |
+        import re, sys
+        try:
+            lines = open('/var/log/pacman.log').readlines()
+        except FileNotFoundError:
+            print('  (pacman log not found)'); sys.exit(0)
+        pkgs = []
+        for line in reversed(lines):
+            m = re.match(r'\[.+\] \[ALPM\] upgraded (\S+) \((.+) -> (.+)\)', line.rstrip())
+            if m: pkgs.append(m.groups())
+            elif '[ALPM] transaction started' in line and pkgs: break
+        if not pkgs:
+            print('  (none - already up to date)')
+        else:
+            for n, o, new in reversed(pkgs):
+                print(f'  {n:<36} {o}  ->  {new}')
+    changed_when: false
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[summary] Pacman — extract per-package version changes"
+    ansible.builtin.command:
+      cmd: python3 /tmp/_ansible_pac_diff.py
+    register: _pacman_versions
+    changed_when: false
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[summary] Pacman — cleanup script"
+    ansible.builtin.file:
+      path: /tmp/_ansible_pac_diff.py
+      state: absent
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[summary] Pacman — set summary facts"
+    ansible.builtin.set_fact:
+      _pkg_versions: "{{ _pacman_versions.stdout | default('  (none)') }}"
+      _pkg_count: "{{ _pacman_versions.stdout_lines | default([]) | select('search', '->') | list | length }}"
+      _upgrade_size: >-
+        {{ pacman_upgrade_result.stdout | default('')
+           | regex_findall('Net Upgrade Size:\s+([0-9.]+ \S+)')
+           | first | default('N/A') }}
+    when: ansible_pkg_mgr == "pacman"
+
+  - name: "[summary] Fallback for unsupported package managers"
+    ansible.builtin.set_fact:
+      _pkg_versions: "  (unsupported package manager: {{ ansible_pkg_mgr }})"
+      _pkg_count: 0
+      _upgrade_size: "N/A"
+    when: ansible_pkg_mgr not in ["apt", "apk", "dnf", "pacman"]
+
+  - name: "[summary] Upgrade report — {{ inventory_hostname }}"
+    ansible.builtin.debug:
+      msg: "{{
+        ['════════════════════════════════════════════════',
+         'UPGRADE SUMMARY  ▸  ' + inventory_hostname,
+         'OS           : ' + ansible_distribution + ' ' + ansible_distribution_version,
+         'Packages (' + _pkg_count | string + '):']
+        + _pkg_versions.splitlines()
+        + ['Upgrade size : ' + _upgrade_size,
+           'Disk free (/) : ' + (_df_avail.stdout | trim),
+           'Reboot       : ' + ('REBOOT' if reboot_needed else 'NOT NEEDED'),
+           '════════════════════════════════════════════════']
+      }}"

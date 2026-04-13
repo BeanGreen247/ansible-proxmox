@@ -44,7 +44,11 @@ preseed_keymap: "us"
 preseed_timezone: "UTC"
 
 # -----------------------------------------------------------------------
-# Hostname defaults (can be overridden per-VM in vms.yml via preseed_hostname)
+# Hostname defaults
+#   build-debian-preseed-iso.yml resolves the hostname in this order:
+#     1. item.preseed_hostname in vms.yml  (if non-empty)
+#     2. item.name in vms.yml             (VM name used as hostname)
+#     3. preseed_hostname below           (fallback if no preseed VMs found)
 # -----------------------------------------------------------------------
 preseed_hostname: "debian-vm"
 preseed_domain: "lan"

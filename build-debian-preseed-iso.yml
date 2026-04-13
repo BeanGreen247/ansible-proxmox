@@ -118,9 +118,30 @@
     tags: [ preseed, build, extract ]
 
   # ------------------------------------------------------------------ #
-  # 5) Render and inject preseed.cfg directly into the extracted ISO root
-  #    template reads the .j2 from the control node, renders with Ansible
-  #    variables, and writes the result to the remote work directory.
+  # 5a) Resolve preseed hostname from vms.yml
+  #     Priority: item.preseed_hostname (if non-empty) -> item.name -> global default
+  #     Note: a single ISO is built for the first preseed-flagged VM.
+  #     If multiple VMs share the same ISO they will all get this hostname
+  #     at install time; rename post-install with setup-debian-base.yml.
+  # ------------------------------------------------------------------ #
+  - name: Resolve preseed hostname from vms.yml (falls back to VM name if preseed_hostname is empty)
+    vars:
+      _preseed_vm: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list | first | default({}) }}"
+    ansible.builtin.set_fact:
+      preseed_hostname: >-
+        {{
+          _preseed_vm.preseed_hostname
+          if (_preseed_vm.preseed_hostname | default('') | length > 0)
+          else (_preseed_vm.name | default(preseed_hostname))
+        }}
+    when: vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list | length > 0
+    tags: [ preseed, build, template, inject ]
+
+  # ------------------------------------------------------------------ #
+  # 5b) Render and inject preseed.cfg directly into the extracted ISO root
+  #     template reads the .j2 from the control node, renders with Ansible
+  #     variables (including preseed_hostname resolved above), and writes
+  #     the result to the remote work directory.
   # ------------------------------------------------------------------ #
   - name: Render and inject preseed.cfg into extracted ISO root
     ansible.builtin.template:
@@ -212,9 +233,9 @@
       regexp: "{{ item }}"
       state: absent
     loop:
-      - '^timeout\s+'
-      - '^ontimeout\s+'
-      - '^menu\s+autoboot\s+'
+    - '^timeout\s+'
+    - '^ontimeout\s+'
+    - '^menu\s+autoboot\s+'
     when: _spkgtk_cfg.stat.exists
     tags: [ preseed, build, isolinux ]
 

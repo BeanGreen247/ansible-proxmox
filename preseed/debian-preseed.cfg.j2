@@ -98,7 +98,12 @@ d-i base-installer/install-recommends boolean false
 
 #### -----------------------------------------------------------------------
 #### APT setup
+#### Disable the install cdrom as an apt source — it causes update failures
+#### on managed VMs since the ISO is ejected after install.
 #### -----------------------------------------------------------------------
+d-i apt-setup/cdrom/set-first boolean false
+d-i apt-setup/cdrom/set-next boolean false
+d-i apt-setup/cdrom/set-failed boolean false
 d-i apt-setup/use_mirror boolean true
 d-i apt-setup/non-free-firmware boolean true
 d-i apt-setup/non-free boolean false

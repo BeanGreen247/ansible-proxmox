@@ -48,7 +48,20 @@
   tasks:
 
   # ------------------------------------------------------------------ #
-  # 0) Update APT cache and upgrade existing packages
+  # 0a) Remove cdrom apt source if present
+  #     The Debian netinst installer adds the install cdrom as an apt source.
+  #     The ISO is ejected after install, so this source causes update failures.
+  #     Removing it here ensures 'apt update' works cleanly on first run.
+  # ------------------------------------------------------------------ #
+  - name: Remove cdrom apt source (left by Debian netinst installer)
+    ansible.builtin.lineinfile:
+      path: /etc/apt/sources.list
+      regexp: '^deb cdrom:'
+      state: absent
+    tags: [ base, apt ]
+
+  # ------------------------------------------------------------------ #
+  # 0b) Update APT cache and upgrade existing packages
   # ------------------------------------------------------------------ #
   - name: Update APT package index
     ansible.builtin.apt:
