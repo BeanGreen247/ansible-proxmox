@@ -1,0 +1,176 @@
+---
+# wazuh_agent_deploy.yml
+# Installs and configures the Wazuh 4.x agent on all apt-based hosts.
+# Registers each agent with the Wazuh manager defined in wazuh_manager_ip.
+# Alpine and other non-apt hosts are skipped automatically.
+#
+# Prerequisites
+#   1. Wazuh server (lxc-wazuh, 192.168.0.243) must be up and running.
+#   2. ansibleuser must already be bootstrapped on each target host.
+#      For a new host (e.g. lxc-wazuh itself), bootstrap it first:
+#        ansible-playbook setup-ansibleuser.yml --limit <host> -u root --ask-pass
+#      Note: setup-ansibleuser.yml uses gather_facts: false, so ansible_os_family
+#      is not available — the shell variable falls back via | default('') filter.
+#   3. host_vars/<host>/vault.yml must exist and be encrypted with ansible-vault.
+#      For lxc-wazuh: host_vars/lxc-wazuh/vault.yml  (vault_become_password)
+#        ansible-vault encrypt host_vars/lxc-wazuh/vault.yml
+#
+# Usage:
+#   ansible-playbook wazuh_agent_deploy.yml              # all vms + lxcs
+#   ansible-playbook wazuh_agent_deploy.yml --limit vms
+#   ansible-playbook wazuh_agent_deploy.yml --limit lxcs
+#   ansible-playbook wazuh_agent_deploy.yml --limit lxcs:!lxc-wazuh  # skip wazuh server
+#   ansible-playbook wazuh_agent_deploy.yml --limit vm-debian-dev.server.wow
+#
+# lxc-wazuh server-side services (run on the LXC directly if services need re-enabling):
+#   systemctl enable wazuh-dashboard.service wazuh-indexer.service \
+#                    wazuh-indexer-performance-analyzer.service wazuh-manager.service
+#   systemctl start  wazuh-dashboard.service wazuh-indexer.service \
+#                    wazuh-indexer-performance-analyzer.service wazuh-manager.service
+#
+# WARNING: Do NOT run this playbook against lxc-wazuh — installing wazuh-agent on the
+#          manager host replaces the wazuh-manager systemd unit and breaks the server.
+#          lxc-wazuh is automatically skipped by this playbook.
+
+- name: Deploy Wazuh agent on apt-based Linux hosts
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    wazuh_manager_ip: "192.168.0.243"
+    wazuh_agent_name: "{{ inventory_hostname }}"
+
+  tasks:
+
+    - name: Skip non-apt hosts (Alpine, etc.)
+      when: ansible_pkg_mgr != 'apt'
+      block:
+        - name: "[wazuh] NOTICE — Alpine Linux has no official Wazuh package (skipping)"
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} uses {{ ansible_pkg_mgr }} ({{ ansible_distribution }}).
+              Wazuh does not publish an official Alpine APK package.
+              This host is SKIPPED — install manually from source if needed.
+        - name: End host — non-apt system
+          ansible.builtin.meta: end_host
+
+    - name: Skip the Wazuh manager host (never touch the server with this playbook)
+      ansible.builtin.meta: end_host
+      when: inventory_hostname == 'lxc-wazuh'
+
+    # ------------------------------------------------------------------ #
+    # Repository setup                                                     #
+    # ------------------------------------------------------------------ #
+
+    - name: "[wazuh] Install prerequisite packages"
+      ansible.builtin.apt:
+        name:
+          - gnupg
+          - gpg
+          - apt-transport-https
+          - curl
+        state: present
+        update_cache: true
+
+    - name: "[wazuh] Import Wazuh GPG key"
+      ansible.builtin.shell:
+        cmd: "curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg"
+        creates: /usr/share/keyrings/wazuh.gpg
+
+    - name: "[wazuh] Add Wazuh APT repository"
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+        filename: wazuh
+        state: present
+        update_cache: true
+
+    # ------------------------------------------------------------------ #
+    # Firewall — open outbound ports to Wazuh manager if UFW is active   #
+    # ------------------------------------------------------------------ #
+
+    - name: "[ufw] Check if UFW is active"
+      ansible.builtin.command:
+        cmd: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    - name: "[ufw] Allow outbound to Wazuh manager — port 1514 (agent comms)"
+      community.general.ufw:
+        rule: allow
+        direction: out
+        dest: "{{ wazuh_manager_ip }}"
+        port: "1514"
+        proto: tcp
+      when: "'Status: active' in ufw_status.stdout"
+
+    - name: "[ufw] Allow outbound to Wazuh manager — port 1515 (agent enrollment)"
+      community.general.ufw:
+        rule: allow
+        direction: out
+        dest: "{{ wazuh_manager_ip }}"
+        port: "1515"
+        proto: tcp
+      when: "'Status: active' in ufw_status.stdout"
+
+    # ------------------------------------------------------------------ #
+    # Install                                                              #
+    # ------------------------------------------------------------------ #
+
+    - name: "[wazuh] Check if wazuh-agent is already installed"
+      ansible.builtin.command:
+        cmd: dpkg-query -W -f='${Status}' wazuh-agent
+      register: wazuh_pkg_status
+      failed_when: false
+      changed_when: false
+
+    - name: "[wazuh] Install wazuh-agent and enroll with manager"
+      ansible.builtin.command:
+        cmd: apt-get install -y wazuh-agent
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+        WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+      when: "'install ok installed' not in wazuh_pkg_status.stdout"
+
+    # ------------------------------------------------------------------ #
+    # Configure — ensure manager IP is correct on every run               #
+    # ------------------------------------------------------------------ #
+
+    - name: "[wazuh] Ensure manager address in ossec.conf"
+      ansible.builtin.lineinfile:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '^\s*<address>.*</address>'
+        line: "      <address>{{ wazuh_manager_ip }}</address>"
+        backrefs: true
+      notify: Restart wazuh-agent
+
+    # ------------------------------------------------------------------ #
+    # Service                                                              #
+    # ------------------------------------------------------------------ #
+
+    - name: "[wazuh] Reload systemd daemon"
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: "[wazuh] Enable and start wazuh-agent"
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        enabled: true
+        state: started
+
+    # ------------------------------------------------------------------ #
+    # Pin package version to prevent accidental upgrades                  #
+    # ------------------------------------------------------------------ #
+
+    - name: "[wazuh] Hold wazuh-agent package (prevent auto-upgrade)"
+      ansible.builtin.dpkg_selections:
+        name: wazuh-agent
+        selection: hold
+
+  handlers:
+    - name: Restart wazuh-agent
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: restarted

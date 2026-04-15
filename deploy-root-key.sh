@@ -27,6 +27,7 @@ declare -A HOSTS=(
   ["lxc-grafana"]="192.168.0.247"
   ["lxc-proxexport"]="192.168.0.246"
   ["lxc-optiping"]="192.168.0.244"
+  ["lxc-wazuh"]="192.168.0.243"
   ["vm-debian-media-server"]="192.168.0.230"
   ["vm-debian-remote-desktop"]="192.168.0.245"
   ["vm-alpine-gitea-dev.server.wow"]="192.168.0.249"

@@ -52,7 +52,7 @@
       group: "{{ ansible_user_name }}"
       # '*' = disabled password (allows key auth); avoids locked '!' on Alpine
       password: "*"
-      shell: "{{ '/bin/ash' if ansible_os_family == 'Alpine' else '/bin/bash' }}"
+      shell: "{{ '/bin/ash' if ansible_os_family | default('') == 'Alpine' else '/bin/bash' }}"
       home: "/home/{{ ansible_user_name }}"
       create_home: true
       state: present

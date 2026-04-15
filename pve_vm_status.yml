@@ -183,7 +183,7 @@
       ansible.builtin.debug:
         msg: >-
           {{
-            "%s/%s  %-32s  %-7s  CPU:%5.1f%%  RAM: %.1fGi/%.1fGi (%.1f%%)" | format(
+            "%s/%s  %-32s  %-7s  CPU:%.1f%%  RAM: %.1fGi/%.1fGi (%.1f%%)" | format(
               item.node|default('-'),
               item.vmid|string,
               (item.name|default('-'))[:32],
