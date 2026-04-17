@@ -12,6 +12,7 @@
   - pkg_mgr
   - distribution
   become: true
+  ignore_unreachable: true
 
   tasks:
 

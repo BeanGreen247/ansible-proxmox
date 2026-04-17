@@ -1,0 +1,8 @@
+---
+# host_vars/lxc-wazuh/main.yml
+
+cis_ufw_extra_ports:
+- { port: "443", proto: "tcp", comment: "Wazuh dashboard (HTTPS)" }
+- { port: "1514", proto: "tcp", comment: "Wazuh agent comms (wazuh-remoted)" }
+- { port: "1515", proto: "tcp", comment: "Wazuh agent enrollment (wazuh-authd)" }
+- { port: "55000", proto: "tcp", comment: "Wazuh REST API" }

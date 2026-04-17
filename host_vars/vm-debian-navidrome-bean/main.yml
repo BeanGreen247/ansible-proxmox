@@ -1,0 +1,23 @@
+---
+# host_vars/vm-debian-navidrome-bean/main.yml
+
+# Add sftpuser alongside the default ansibleuser/cartman so CIS AllowUsers permits them.
+# AllowUsers is built as: "ansibleuser <vm_enduser_name> <cis_ssh_extra_users>"
+cis_ssh_extra_users: "ftpuser"
+
+# Allow password auth for ftpuser via a Match block (CIS disables it globally).
+cis_sftp_password_users: "ftpuser"
+
+cis_ufw_extra_ports:
+- { port: "4533", proto: "tcp", comment: "Navidrome music server" }
+- { port: "21", proto: "tcp", comment: "vsftpd FTP control" }
+- { port: "40000:40100", proto: "tcp", comment: "vsftpd FTP passive data" }
+
+cis_preserve_services:
+- ssh
+- sshd
+- qemu-guest-agent
+- ufw
+- auditd
+- apparmor
+- vsftpd

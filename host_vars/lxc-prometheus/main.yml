@@ -1,0 +1,6 @@
+---
+# host_vars/lxc-prometheus/main.yml
+
+cis_ufw_extra_ports:
+- { port: "9090", proto: "tcp", comment: "Prometheus metrics endpoint" }
+- { port: "9093", proto: "tcp", comment: "Alertmanager" }

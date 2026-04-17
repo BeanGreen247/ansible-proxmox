@@ -287,3 +287,116 @@
       - "Headroom (all running at MAX) : {{ headroom_running }} Gi  |  Status: {{ status_running }}"
       - "All guests     : {{ vm_sorted | length }} | All MAX sum     : {{ all_max_sum }} Gi"
       - "Headroom (all guests at MAX)  : {{ headroom_all }} Gi  |  Status: {{ status_all }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PLAY 2: Fleet health check — SSH reachability + critical service states
+#
+#   Connects to every host in [lxcs] and [vms] groups, gathers service facts,
+#   and reports whether expected services are running.  Unreachable hosts are
+#   caught and surfaced in the consolidated summary at the end.
+#
+#   Run stand-alone (skips the Proxmox API play above):
+#     ansible-playbook pve_vm_status.yml --tags health
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Fleet health check — per-host SSH and service status
+  hosts: lxcs:vms
+  gather_facts: true
+  become: false
+  ignore_unreachable: true
+  tags: [ health ]
+
+  vars:
+    # Required on every apt-based host; if not running → DEGRADED
+    _required_all: [ ssh ]
+    # Required on full VMs only (not LXC containers)
+    _required_vms: [ qemu-guest-agent ]
+    # Informational only — reported when present, silently skipped when not
+    _optional_svcs:
+    - wazuh-agent
+    - wazuh-manager
+    - nginx
+    - authelia
+    - grafana-server
+    - prometheus
+
+  tasks:
+
+  - name: "[health] Gather service facts (apt-based hosts)"
+    ansible.builtin.service_facts:
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apt'
+
+  - name: "[health] Evaluate required services"
+    ansible.builtin.set_fact:
+      _ssh_state: "{{ ansible_facts.services['ssh.service'].state    | default('not found') }}"
+      _sshd_state: "{{ ansible_facts.services['sshd.service'].state   | default('not found') }}"
+      _qga_state: "{{ ansible_facts.services['qemu-guest-agent.service'].state | default('N/A') }}"
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apt'
+
+  - name: "[health] Evaluate optional services"
+    ansible.builtin.set_fact:
+      _opt_wazuh_agent: "{{ ansible_facts.services['wazuh-agent.service'].state   | default(omit) }}"
+      _opt_wazuh_mgr: "{{ ansible_facts.services['wazuh-manager.service'].state | default(omit) }}"
+      _opt_nginx: "{{ ansible_facts.services['nginx.service'].state         | default(omit) }}"
+      _opt_authelia: "{{ ansible_facts.services['authelia.service'].state      | default(omit) }}"
+      _opt_grafana: "{{ ansible_facts.services['grafana-server.service'].state | default(omit) }}"
+      _opt_prometheus: "{{ ansible_facts.services['prometheus.service'].state    | default(omit) }}"
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apt'
+
+  # SSH can be named 'ssh' or 'sshd' depending on distro; treat either as OK
+  - name: "[health] Determine overall host status"
+    ansible.builtin.set_fact:
+      _health_ok: >-
+        {{
+          ((_ssh_state | default('') == 'running') or (_sshd_state | default('') == 'running'))
+          and
+          (
+            (inventory_hostname not in groups['vms'])
+            or (_qga_state | default('') == 'running')
+          )
+        }}
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apt'
+
+  - name: "[health] Set Alpine host health"
+    ansible.builtin.set_fact:
+      _health_ok: true # SSH reachable; service_facts not checked on apk hosts
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apk'
+
+  - name: "[health] Print per-host status (Debian/Ubuntu)"
+    ansible.builtin.debug:
+      msg:
+      - "Host       : {{ inventory_hostname }} ({{ ansible_host }})"
+      - "OS         : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      - "ssh        : {{ (_ssh_state | default('') == 'running' or _sshd_state | default('') == 'running') | ternary('running', 'NOT RUNNING') }}"
+      - "qemu-ga    : {{ _qga_state | default('N/A (LXC)') }}{{ (inventory_hostname in groups['vms'] and _qga_state | default('') != 'running') | ternary(' ← WARN', '') }}"
+      - "wazuh-agent: {{ _opt_wazuh_agent | default('not installed') }}"
+      - "wazuh-mgr  : {{ _opt_wazuh_mgr   | default('not installed') }}"
+      - "nginx      : {{ _opt_nginx        | default('not installed') }}"
+      - "authelia   : {{ _opt_authelia     | default('not installed') }}"
+      - "grafana    : {{ _opt_grafana      | default('not installed') }}"
+      - "prometheus : {{ _opt_prometheus   | default('not installed') }}"
+      - "STATUS     : {{ _health_ok | default(false) | ternary('OK', 'DEGRADED') }}"
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apt'
+
+  - name: "[health] Print Alpine host status"
+    ansible.builtin.debug:
+      msg: "{{ inventory_hostname }} ({{ ansible_host }}) | SSH REACHABLE | Alpine — service_facts skipped"
+    when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apk'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PLAY 3: Consolidated fleet summary (runs on control node from hostvars)
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Fleet health — consolidated summary
+  hosts: localhost
+  gather_facts: false
+  tags: [ health ]
+
+  tasks:
+
+  - name: "[health] Print consolidated fleet table"
+    vars:
+      _fleet: "{{ (groups['lxcs'] | default([])) + (groups['vms'] | default([])) }}"
+      _hdr: "=== Fleet Health Summary ============================================"
+      _ftr: "====================================================================="
+    ansible.builtin.debug:
+      msg: >-
+        {%- set ns = namespace(rows=[_hdr]) -%} {%- for h in _fleet -%} {%-   set hv = hostvars[h] -%} {%-   set ip = hv.ansible_host | default('?') -%} {%-   if hv._health_ok is defined -%} {%-     set st = hv._health_ok | ternary('OK         ', 'DEGRADED   ') -%} {%-     set os = (hv.ansible_distribution | default('?') + ' ' + hv.ansible_distribution_version | default(''))[:14] -%} {%-   else -%} {%-     set st = 'UNREACHABLE' -%} {%-     set os = '?' -%} {%-   endif -%} {%-   set _ = ns.rows.append('%-40s %-16s %-15s %s' | format(h, ip, os, st)) -%} {%- endfor -%} {%- set _ = ns.rows.append(_ftr) -%} {{ ns.rows | join('\n') }}

@@ -1,0 +1,7 @@
+---
+# host_vars/vm-debian-mc-server/main.yml
+
+cis_ufw_extra_ports:
+- { port: "9900", proto: "tcp", comment: "Minecraft server" }
+- { port: "28258", proto: "tcp", comment: "Minecraft RCON / query" }
+- { port: "8443", proto: "tcp", comment: "MC management panel" }

@@ -48,6 +48,7 @@
   hosts: proxmox-bms
   become: true
   gather_facts: false
+  ignore_unreachable: true
 
   vars:
     # Paths computed from preseed_vars.yml defaults

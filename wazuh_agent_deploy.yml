@@ -18,9 +18,23 @@
 # Usage:
 #   ansible-playbook wazuh_agent_deploy.yml              # all vms + lxcs
 #   ansible-playbook wazuh_agent_deploy.yml --limit vms
-#   ansible-playbook wazuh_agent_deploy.yml --limit lxcs
-#   ansible-playbook wazuh_agent_deploy.yml --limit lxcs:!lxc-wazuh  # skip wazuh server
+#   ansible-playbook wazuh_agent_deploy.yml --limit lxcs:!lxc-wazuh  # recommended: skips wazuh server
 #   ansible-playbook wazuh_agent_deploy.yml --limit vm-debian-dev.server.wow
+#
+# Testing (runs against already-deployed agents — no install steps):
+#   ansible-playbook wazuh_agent_deploy.yml --tags test
+#   ansible-playbook wazuh_agent_deploy.yml --tags test --limit lxcs:!lxc-wazuh
+#
+# IP check only (no remote tasks beyond fact gathering):
+#   ansible-playbook wazuh_agent_deploy.yml --tags always --limit lxcs:!lxc-wazuh
+#
+# The [always]-tagged task prints each host's IP (parsed from hosts.ini via
+# ansible_host) so you can confirm inventory resolution before any work runs.
+#
+# NOTE: lxc-wazuh must be excluded from --limit lxcs runs. Although this playbook
+#       skips lxc-wazuh via meta: end_host, gather_facts fires over SSH first and
+#       will fail with "Permission denied" if ansibleuser is not bootstrapped there.
+#       Use lxcs:!lxc-wazuh to avoid the confusing (but harmless) unreachable error.
 #
 # lxc-wazuh server-side services (run on the LXC directly if services need re-enabling):
 #   systemctl enable wazuh-dashboard.service wazuh-indexer.service \
@@ -36,6 +50,7 @@
   hosts: all
   gather_facts: true
   become: true
+  ignore_unreachable: true
 
   vars:
     wazuh_manager_ip: "192.168.0.243"
@@ -43,134 +58,208 @@
 
   tasks:
 
-    - name: Skip non-apt hosts (Alpine, etc.)
-      when: ansible_pkg_mgr != 'apt'
-      block:
-        - name: "[wazuh] NOTICE — Alpine Linux has no official Wazuh package (skipping)"
-          ansible.builtin.debug:
-            msg: >-
-              {{ inventory_hostname }} uses {{ ansible_pkg_mgr }} ({{ ansible_distribution }}).
-              Wazuh does not publish an official Alpine APK package.
-              This host is SKIPPED — install manually from source if needed.
-        - name: End host — non-apt system
-          ansible.builtin.meta: end_host
+  # ------------------------------------------------------------------ #
+  # Inventory — show the IP parsed from hosts.ini                    #
+  # ------------------------------------------------------------------ #
 
-    - name: Skip the Wazuh manager host (never touch the server with this playbook)
+  - name: "[wazuh] Show inventory host details"
+    ansible.builtin.debug:
+      msg: "Host: {{ inventory_hostname }}  →  IP (ansible_host): {{ ansible_host }}"
+    tags: [ always ]
+
+  - name: Skip non-apt hosts (Alpine, etc.)
+    when: ansible_pkg_mgr != 'apt'
+    block:
+    - name: "[wazuh] NOTICE — Alpine Linux has no official Wazuh package (skipping)"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} uses {{ ansible_pkg_mgr }} ({{ ansible_distribution }}). Wazuh does not publish an official Alpine APK package. This host is SKIPPED — install manually from source if needed.
+    - name: End host — non-apt system
       ansible.builtin.meta: end_host
-      when: inventory_hostname == 'lxc-wazuh'
 
-    # ------------------------------------------------------------------ #
-    # Repository setup                                                     #
-    # ------------------------------------------------------------------ #
+  - name: Skip the Wazuh manager host (never touch the server with this playbook)
+    ansible.builtin.meta: end_host
+    when: inventory_hostname == 'lxc-wazuh'
 
-    - name: "[wazuh] Install prerequisite packages"
-      ansible.builtin.apt:
-        name:
-          - gnupg
-          - gpg
-          - apt-transport-https
-          - curl
-        state: present
-        update_cache: true
+  # ------------------------------------------------------------------ #
+  # Repository setup                                                     #
+  # ------------------------------------------------------------------ #
 
-    - name: "[wazuh] Import Wazuh GPG key"
-      ansible.builtin.shell:
-        cmd: "curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg"
-        creates: /usr/share/keyrings/wazuh.gpg
+  - name: "[wazuh] Install prerequisite packages"
+    ansible.builtin.apt:
+      name:
+      - gnupg
+      - gpg
+      - apt-transport-https
+      - curl
+      state: present
+      update_cache: true
 
-    - name: "[wazuh] Add Wazuh APT repository"
-      ansible.builtin.apt_repository:
-        repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
-        filename: wazuh
-        state: present
-        update_cache: true
+  - name: "[wazuh] Import Wazuh GPG key"
+    ansible.builtin.shell:
+      cmd: "curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg"
+      creates: /usr/share/keyrings/wazuh.gpg
 
-    # ------------------------------------------------------------------ #
-    # Firewall — open outbound ports to Wazuh manager if UFW is active   #
-    # ------------------------------------------------------------------ #
+  - name: "[wazuh] Add Wazuh APT repository"
+    ansible.builtin.apt_repository:
+      repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+      filename: wazuh
+      state: present
+      update_cache: true
 
-    - name: "[ufw] Check if UFW is active"
-      ansible.builtin.command:
-        cmd: ufw status
-      register: ufw_status
-      changed_when: false
-      failed_when: false
+  # ------------------------------------------------------------------ #
+  # Firewall — open outbound ports to Wazuh manager if UFW is active   #
+  # ------------------------------------------------------------------ #
 
-    - name: "[ufw] Allow outbound to Wazuh manager — port 1514 (agent comms)"
-      community.general.ufw:
-        rule: allow
-        direction: out
-        dest: "{{ wazuh_manager_ip }}"
-        port: "1514"
-        proto: tcp
-      when: "'Status: active' in ufw_status.stdout"
+  - name: "[ufw] Check if UFW is active"
+    ansible.builtin.command:
+      cmd: ufw status
+    register: ufw_status
+    changed_when: false
+    failed_when: false
 
-    - name: "[ufw] Allow outbound to Wazuh manager — port 1515 (agent enrollment)"
-      community.general.ufw:
-        rule: allow
-        direction: out
-        dest: "{{ wazuh_manager_ip }}"
-        port: "1515"
-        proto: tcp
-      when: "'Status: active' in ufw_status.stdout"
+  - name: "[ufw] Allow outbound to Wazuh manager — port 1514 (agent comms)"
+    community.general.ufw:
+      rule: allow
+      direction: out
+      dest: "{{ wazuh_manager_ip }}"
+      port: "1514"
+      proto: tcp
+    when: "'Status: active' in ufw_status.stdout"
 
-    # ------------------------------------------------------------------ #
-    # Install                                                              #
-    # ------------------------------------------------------------------ #
+  - name: "[ufw] Allow outbound to Wazuh manager — port 1515 (agent enrollment)"
+    community.general.ufw:
+      rule: allow
+      direction: out
+      dest: "{{ wazuh_manager_ip }}"
+      port: "1515"
+      proto: tcp
+    when: "'Status: active' in ufw_status.stdout"
 
-    - name: "[wazuh] Check if wazuh-agent is already installed"
-      ansible.builtin.command:
-        cmd: dpkg-query -W -f='${Status}' wazuh-agent
-      register: wazuh_pkg_status
-      failed_when: false
-      changed_when: false
+  # ------------------------------------------------------------------ #
+  # Install                                                              #
+  # ------------------------------------------------------------------ #
 
-    - name: "[wazuh] Install wazuh-agent and enroll with manager"
-      ansible.builtin.command:
-        cmd: apt-get install -y wazuh-agent
-      environment:
-        DEBIAN_FRONTEND: noninteractive
-        WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
-        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
-      when: "'install ok installed' not in wazuh_pkg_status.stdout"
+  - name: "[wazuh] Check if wazuh-agent is already installed"
+    ansible.builtin.command:
+      cmd: dpkg-query -W -f='${Status}' wazuh-agent
+    register: wazuh_pkg_status
+    failed_when: false
+    changed_when: false
 
-    # ------------------------------------------------------------------ #
-    # Configure — ensure manager IP is correct on every run               #
-    # ------------------------------------------------------------------ #
+  - name: "[wazuh] Install wazuh-agent and enroll with manager"
+    ansible.builtin.command:
+      cmd: apt-get install -y wazuh-agent
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+      WAZUH_MANAGER: "{{ wazuh_manager_ip }}"
+      WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+    when: "'install ok installed' not in wazuh_pkg_status.stdout"
 
-    - name: "[wazuh] Ensure manager address in ossec.conf"
-      ansible.builtin.lineinfile:
-        path: /var/ossec/etc/ossec.conf
-        regexp: '^\s*<address>.*</address>'
-        line: "      <address>{{ wazuh_manager_ip }}</address>"
-        backrefs: true
-      notify: Restart wazuh-agent
+  # ------------------------------------------------------------------ #
+  # Configure — ensure manager IP is correct on every run               #
+  # ------------------------------------------------------------------ #
 
-    # ------------------------------------------------------------------ #
-    # Service                                                              #
-    # ------------------------------------------------------------------ #
+  - name: "[wazuh] Ensure manager address in ossec.conf"
+    ansible.builtin.lineinfile:
+      path: /var/ossec/etc/ossec.conf
+      regexp: '^\s*<address>.*</address>'
+      line: "      <address>{{ wazuh_manager_ip }}</address>"
+      backrefs: true
+    notify: Restart wazuh-agent
 
-    - name: "[wazuh] Reload systemd daemon"
-      ansible.builtin.systemd:
-        daemon_reload: true
+  # ------------------------------------------------------------------ #
+  # Service                                                              #
+  # ------------------------------------------------------------------ #
 
-    - name: "[wazuh] Enable and start wazuh-agent"
+  - name: "[wazuh] Reload systemd daemon"
+    ansible.builtin.systemd:
+      daemon_reload: true
+
+  - name: "[wazuh] Enable and start wazuh-agent"
+    ansible.builtin.systemd:
+      name: wazuh-agent
+      enabled: true
+      state: started
+
+  # ------------------------------------------------------------------ #
+  # Pin package version to prevent accidental upgrades                  #
+  # ------------------------------------------------------------------ #
+
+  - name: "[wazuh] Hold wazuh-agent package (prevent auto-upgrade)"
+    ansible.builtin.dpkg_selections:
+      name: wazuh-agent
+      selection: hold
+
+  # ------------------------------------------------------------------ #
+  # Test / Verify — run with:                                           #
+  #   ansible-playbook wazuh_agent_deploy.yml --tags test               #
+  # lxc-wazuh is always excluded — it runs the manager, not the agent. #
+  # ------------------------------------------------------------------ #
+
+  - name: "[wazuh][test] Run agent checks (skipped on lxc-wazuh)"
+    when: inventory_hostname != 'lxc-wazuh'
+    tags: [ test ]
+    block:
+
+    - name: "[wazuh][test] Verify wazuh-agent service is running"
       ansible.builtin.systemd:
         name: wazuh-agent
-        enabled: true
+      register: wazuh_service_state
+      changed_when: false
+
+    - name: "[wazuh][test] Assert wazuh-agent is active"
+      ansible.builtin.assert:
+        that:
+        - wazuh_service_state.status is defined
+        - wazuh_service_state.status.ActiveState == 'active'
+        fail_msg: "wazuh-agent is NOT running on {{ inventory_hostname }} ({{ ansible_host }})"
+        success_msg: "wazuh-agent is running on {{ inventory_hostname }} ({{ ansible_host }})"
+
+    - name: "[wazuh][test] Verify manager address in ossec.conf matches wazuh_manager_ip"
+      ansible.builtin.command:
+        cmd: grep -E '<address>' /var/ossec/etc/ossec.conf
+      register: ossec_address
+      changed_when: false
+      failed_when: wazuh_manager_ip not in ossec_address.stdout
+
+    - name: "[wazuh][test] Show ossec.conf manager address"
+      ansible.builtin.debug:
+        msg: "ossec.conf manager entry: {{ ossec_address.stdout | trim }}  (expected: {{ wazuh_manager_ip }})"
+
+    - name: "[wazuh][test] Check TCP reachability to manager port 1514 (agent comms)"
+      ansible.builtin.wait_for:
+        host: "{{ wazuh_manager_ip }}"
+        port: 1514
+        timeout: 5
         state: started
+      ignore_errors: true
+      register: port_1514_check
 
-    # ------------------------------------------------------------------ #
-    # Pin package version to prevent accidental upgrades                  #
-    # ------------------------------------------------------------------ #
+    - name: "[wazuh][test] Check TCP reachability to manager port 1515 (enrollment)"
+      ansible.builtin.wait_for:
+        host: "{{ wazuh_manager_ip }}"
+        port: 1515
+        timeout: 5
+        state: started
+      ignore_errors: true
+      register: port_1515_check
 
-    - name: "[wazuh] Hold wazuh-agent package (prevent auto-upgrade)"
-      ansible.builtin.dpkg_selections:
-        name: wazuh-agent
-        selection: hold
+    - name: "[wazuh][test] Report connectivity results"
+      ansible.builtin.debug:
+        msg:
+        - "Host: {{ inventory_hostname }}  IP: {{ ansible_host }}"
+        - "Port 1514 → {{ 'OPEN' if not port_1514_check.failed else 'UNREACHABLE' }}"
+        - "Port 1515 → {{ 'OPEN' if not port_1515_check.failed else 'UNREACHABLE' }}"
+
+    rescue:
+    - name: "[wazuh][test] NOTICE — host unreachable or agent not yet installed"
+      ansible.builtin.debug:
+        msg: >-
+          SKIPPED: {{ inventory_hostname }} ({{ ansible_host }}) was unreachable or has no wazuh-agent installed yet. Bootstrap the host first, then re-run --tags test.
 
   handlers:
-    - name: Restart wazuh-agent
-      ansible.builtin.systemd:
-        name: wazuh-agent
-        state: restarted
+  - name: Restart wazuh-agent
+    ansible.builtin.systemd:
+      name: wazuh-agent
+      state: restarted

@@ -1,0 +1,5 @@
+---
+# host_vars/lxc-grafana/main.yml
+
+cis_ufw_extra_ports:
+- { port: "3000", proto: "tcp", comment: "Grafana web UI" }

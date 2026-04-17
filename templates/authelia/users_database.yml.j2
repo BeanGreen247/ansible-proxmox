@@ -1,0 +1,17 @@
+---
+# Authelia internal users database — managed by Ansible (setup-lxc-2fa-master.yml)
+# Do not edit manually; changes will be overwritten on next playbook run.
+#
+# To add more users, extend authelia_services vars and re-run the playbook,
+# or add them directly here (and remove the Ansible-managed header warning).
+#
+# Password hashes are Argon2id. Generate with:
+#   authelia crypto hash generate argon2 --password 'yourpassword'
+
+users:
+  {{ authelia_username }}:
+    displayname: '{{ authelia_display_name }}'
+    password: '{{ vault_authelia_user_password_hash }}'
+    email: '{{ authelia_user_email }}'
+    groups:
+      - admins

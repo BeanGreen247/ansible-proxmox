@@ -1,0 +1,36 @@
+# Nginx vhost — Authelia TOTP portal
+# Managed by Ansible (setup-lxc-2fa-master.yml). Do not edit manually.
+#
+# Serves the Authelia web UI at https://{{ authelia_auth_hostname }}.{{ authelia_domain }}
+# This is where users log in and register their TOTP authenticator app.
+
+server {
+    listen 443 ssl;
+    server_name {{ authelia_auth_hostname }}.{{ authelia_domain }};
+
+    ssl_certificate     {{ authelia_tls_dir }}/authelia.crt;
+    ssl_certificate_key {{ authelia_tls_dir }}/authelia.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    location / {
+        proxy_pass         http://127.0.0.1:9091;
+        proxy_set_header   Host              $http_host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+}
+
+server {
+    listen 80;
+    server_name {{ authelia_auth_hostname }}.{{ authelia_domain }};
+    return 301 https://$host$request_uri;
+}

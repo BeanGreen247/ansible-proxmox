@@ -3,22 +3,24 @@
 # Bootstrap playbook — run this ONCE per host before using update_upgrade.yml.
 # Connects as root to create ansibleuser, grant sudo, and deploy your SSH key.
 #
-# Usage:
-#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
-#     -u root --ask-pass
+# If the container/VM was created via create-lxc-proxmox.yml (which injects pubkey
+# into root's authorized_keys), SSH key auth is already in place — no --ask-pass needed:
+#   ansible-playbook setup-ansibleuser.yml -u root --limit lxcs
 #
-# If root uses a key:
-#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
-#     -u root --private-key ~/.ssh/id_rsa_root
+# If root does NOT yet have your SSH key (e.g. manual install, no pubkey injection):
+#   ansible-playbook setup-ansibleuser.yml -u root --ask-pass
+#
+# If root uses a different key:
+#   ansible-playbook setup-ansibleuser.yml -u root --private-key ~/.ssh/id_rsa_root
 #
 # To target a single host only:
-#   ansible-playbook -i inventory/hosts.ini setup-ansibleuser.yml \
-#     -u root --ask-pass --limit lxc-prometheus
+#   ansible-playbook setup-ansibleuser.yml -u root --limit lxc-2fa-master
 
 - name: Bootstrap ansibleuser on all hosts
   hosts: all
   gather_facts: false
   become: true
+  ignore_unreachable: true
 
   vars:
     # Always connect as root for bootstrapping, regardless of inventory ansible_user
@@ -38,6 +40,13 @@
     ansible.builtin.raw: |
       if [ -f /etc/alpine-release ]; then
         apk add --no-cache python3 sudo
+      fi
+    changed_when: false
+
+  - name: Ensure sudo is installed (Debian/Ubuntu)
+    ansible.builtin.raw: |
+      if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y sudo 2>&1
       fi
     changed_when: false
 

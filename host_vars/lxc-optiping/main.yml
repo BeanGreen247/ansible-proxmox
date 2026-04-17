@@ -1,0 +1,5 @@
+---
+# host_vars/lxc-optiping/main.yml
+
+cis_ufw_extra_ports:
+- { port: "8080", proto: "tcp", comment: "Optiping web UI" }

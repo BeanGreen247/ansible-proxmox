@@ -41,6 +41,7 @@
   hosts: new-debian-vms
   become: true
   gather_facts: true
+  ignore_unreachable: true
 
   vars:
     _ansible_user: "{{ preseed_ansible_user | default('ansible') }}"

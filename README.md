@@ -16,12 +16,13 @@
 6. [Playbook Reference](#playbook-reference)
 7. [Configuration Reference](#configuration-reference)
 8. [VM Definitions — `vms.yml`](#vm-definitions--vmsyml)
-9. [Inventory](#inventory)
-10. [Preseed Template](#preseed-template)
-11. [Day-to-Day Operations](#day-to-day-operations)
-12. [Vault — Managing Secrets](#vault--managing-secrets)
-13. [Performance Tuning](#performance-tuning)
-14. [User Guide](#user-guide)
+9. [LXC Definitions — `lxcs.yml`](#lxc-definitions--lxcsyml)
+10. [Inventory](#inventory)
+11. [Preseed Template](#preseed-template)
+12. [Day-to-Day Operations](#day-to-day-operations)
+13. [Vault — Managing Secrets](#vault--managing-secrets)
+14. [Performance Tuning](#performance-tuning)
+15. [User Guide](#user-guide)
 
 ---
 
@@ -66,8 +67,17 @@ fetch-iso.yml                       Download Debian netinst ISO to Proxmox node
 ### Fleet Management
 
 ```
-pve_vm_status.yml    Live CPU/RAM report for every guest (read-only)
-update_upgrade.yml   Parallel upgrades across all guests (apt/apk/dnf/pacman)
+pve_vm_status.yml       Live CPU/RAM report for every guest (read-only)
+update_upgrade.yml      Parallel upgrades across all guests (apt/apk/dnf/pacman)
+wazuh_agent_deploy.yml  Deploy/configure Wazuh agent on all apt-based hosts
+```
+
+### LXC Provisioning
+
+```
+create-lxc-proxmox.yml  Create and start LXC containers via the Proxmox API
+  └─> setup-ansibleuser.yml          Bootstrap ansibleuser on the new container
+        └─> setup-lxc-2fa-master.yml (or other service playbook)
 ```
 
 ---
@@ -85,10 +95,13 @@ ansible-proxmox/
 ├── create-vm-from-iso-proxmox.yml       Step 3 – Create VM shell via API
 ├── auto-install-debian.yml              Step 4 – Boot VM, wait for install + SSH
 ├── setup-debian-base.yml                Step 5 – Install base packages, harden SSH
+├── create-lxc-proxmox.yml               Create LXC containers via Proxmox API
 ├── setup-base-ansible-proxmox.yml       Bootstrap – Install proxmoxer on Proxmox node
-├── setup-ansibleuser.yml                Bootstrap – Create ansible user on all guests
+├── setup-ansibleuser.yml                Bootstrap – Create ansibleuser on all guests
 ├── pve_vm_status.yml                    Day-to-day – Live resource report
 ├── update_upgrade.yml                   Day-to-day – Upgrade all guests
+├── wazuh_agent_deploy.yml               Security – Deploy Wazuh agent fleet-wide
+├── setup-lxc-2fa-master.yml             Security – Nginx + Authelia TOTP gateway
 │
 ├── inventory/
 │   └── hosts.ini                        All managed hosts grouped by type
@@ -99,14 +112,23 @@ ansible-proxmox/
 │       ├── example_of_main.yml          Template – copy to main.yml and fill in secrets
 │       ├── main.yml                     (gitignored) API tokens, vault references
 │       ├── preseed_vars.yml             All Debian install + preseed settings
-│       └── vms.yml                      VM definitions – the single source of truth
+│       ├── vms.yml                      VM definitions – single source of truth for VMs
+│       └── lxcs.yml                     LXC definitions – single source of truth for containers
 │
 ├── host_vars/
 │   └── <hostname>/
-│       └── vault.yml                    (gitignored) Encrypted per-host root password
+│       └── vault.yml                    (gitignored) Encrypted per-host passwords/secrets
 │
 ├── preseed/
 │   └── debian-preseed.cfg.j2            Jinja2 template for the Debian answer file
+│
+├── templates/
+│   ├── authelia/
+│   │   ├── configuration.yml.j2         Authelia main config (TOTP, access rules)
+│   │   └── users_database.yml.j2        Authelia internal user database
+│   └── nginx/
+│       ├── authelia-auth-portal.conf.j2  Nginx vhost for the Authelia login portal
+│       └── authelia-service-vhost.conf.j2 Nginx vhost template per protected service
 │
 ├── collections/
 │   └── requirements.yml                 community.proxmox + community.general
@@ -278,6 +300,51 @@ ansible-playbook -i inventory/hosts.ini create-vm-from-iso-proxmox.yml \
 
 ---
 
+### `create-lxc-proxmox.yml` — Create LXC Containers
+
+Creates and starts LXC containers via the Proxmox API using definitions from `group_vars/all/lxcs.yml`. Idempotent — existing containers (matched by vmid) are left untouched.
+
+```bash
+# Create all containers defined in lxcs.yml
+ansible-playbook create-lxc-proxmox.yml --tags createLXCs
+
+# Create and immediately start them
+ansible-playbook create-lxc-proxmox.yml --tags createLXCs,startLXCs
+
+# Apply spec changes from lxcs.yml to existing containers (cores, memory, swap, features, etc.)
+ansible-playbook create-lxc-proxmox.yml --tags updateLXCs
+
+# Update a single container
+ansible-playbook create-lxc-proxmox.yml --limit lxc-grafana --tags updateLXCs
+
+# Start already-created containers
+ansible-playbook create-lxc-proxmox.yml --tags startLXCs
+
+# Stop containers (explicit opt-in required)
+ansible-playbook create-lxc-proxmox.yml --tags stopLXCs
+
+# Destroy containers + rootfs (DESTRUCTIVE — explicit opt-in required)
+ansible-playbook create-lxc-proxmox.yml --tags removeLXCs
+```
+
+| Tag | Action |
+|---|---|
+| `createLXCs` | Create container shells (idempotent — skips existing vmids) |
+| `updateLXCs` | Push spec changes from `lxcs.yml` to running containers (cores/memory/swap/features) |
+| `startLXCs` | Start containers |
+| `stopLXCs` | Stop containers (explicit opt-in) |
+| `removeLXCs` | Destroy containers + rootfs (explicit opt-in, DESTRUCTIVE) |
+
+> **Note:** `updateLXCs` does not resize the rootfs or change IP/network config — those require a stop/recreate cycle.
+
+After creating a new container, bootstrap it:
+
+```bash
+ansible-playbook setup-ansibleuser.yml --limit lxc-mycontainer -u root --ask-pass
+```
+
+---
+
 ### `auto-install-debian.yml` — Unattended OS Install
 
 Boots preseed-flagged VMs and waits for the Debian installer to complete and SSH to become available. No human interaction required after this starts.
@@ -336,7 +403,7 @@ ansible-playbook -i inventory/hosts.ini setup-base-ansible-proxmox.yml
 
 ### `setup-ansibleuser.yml` — Create Automation User on Guests
 
-Creates the `ansible` user (or custom `ansible_user_name`) on every managed host with:
+Creates the `ansibleuser` on every managed host with:
 - Password login disabled — SSH key auth only
 - Passwordless sudo (`NOPASSWD: ALL`)
 - Your SSH public key pre-installed
@@ -453,6 +520,80 @@ ok: [vm-alpine-gitea-dev.server.wow] => {
 
 ---
 
+### `wazuh_agent_deploy.yml` — Deploy Wazuh Security Agent
+
+Installs and registers the Wazuh 4.x agent on all apt-based hosts in the inventory. Alpine and other non-apt hosts are skipped automatically. The Wazuh manager host (`lxc-wazuh`) is always excluded to prevent overwriting the server.
+
+```bash
+# Deploy to all hosts
+ansible-playbook wazuh_agent_deploy.yml
+
+# VMs only
+ansible-playbook wazuh_agent_deploy.yml --limit vms
+
+# LXCs only (excluding the Wazuh server itself)
+ansible-playbook wazuh_agent_deploy.yml --limit 'lxcs:!lxc-wazuh'
+
+# Single host
+ansible-playbook wazuh_agent_deploy.yml --limit vm-debian-dev.server.wow
+```
+
+Key vars (set in the playbook):
+
+| Variable | Default | Description |
+|---|---|---|
+| `wazuh_manager_ip` | `192.168.0.243` | IP of the Wazuh manager (lxc-wazuh) |
+| `wazuh_agent_name` | `inventory_hostname` | Agent display name in the Wazuh dashboard |
+
+The agent package is pinned with `apt-mark hold` after install to prevent accidental version upgrades.
+
+---
+
+### `setup-lxc-2fa-master.yml` — TOTP Gateway (Nginx + Authelia)
+
+Installs Nginx and Authelia on `lxc-2fa-master` to provide TOTP two-factor authentication in front of services that have no native MFA support (Wazuh dashboard, Grafana, etc.).
+
+**Architecture:**
+```
+Browser → lxc-2fa-master:443 (Nginx) → Authelia TOTP portal
+                                       → backend service (Wazuh, Grafana, …)
+```
+
+Backend services stay on their existing IPs/ports — never directly exposed. All TOTP enforcement happens at the Nginx `auth_request` layer.
+
+```bash
+# Full deploy
+ansible-playbook setup-lxc-2fa-master.yml
+
+# Nginx config only
+ansible-playbook setup-lxc-2fa-master.yml --tags nginx
+
+# Authelia config only
+ansible-playbook setup-lxc-2fa-master.yml --tags authelia
+```
+
+Required vault vars in `host_vars/lxc-2fa-master/vault.yml`:
+
+| Variable | How to generate |
+|---|---|
+| `vault_become_password` | sudo password for the LXC |
+| `vault_authelia_jwt_secret` | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `vault_authelia_session_secret` | same as above |
+| `vault_authelia_storage_encryption_key` | same as above |
+| `vault_authelia_user_password_hash` | `authelia crypto hash generate argon2 --password 'yourpassword'` |
+
+**First-time order:**
+1. Create `lxc-2fa-master` — `ansible-playbook create-lxc-proxmox.yml --tags createLXCs,startLXCs`
+2. Bootstrap — `ansible-playbook setup-ansibleuser.yml --limit lxc-2fa-master -u root --ask-pass`
+3. Fill in and encrypt `host_vars/lxc-2fa-master/vault.yml`
+4. Deploy — `ansible-playbook setup-lxc-2fa-master.yml`
+5. Add DNS entries for `auth.lan`, `wazuh.lan`, `grafana.lan` → `192.168.0.242`
+6. Browse to `https://auth.lan`, log in, scan TOTP QR code
+
+To add more protected services, add an entry to `authelia_services` in the playbook and re-run.
+
+---
+
 ### `deploy-root-key.sh` — Push SSH Key to Root
 
 A Bash script (not a playbook) that uses the vault-encrypted root passwords in `host_vars/<hostname>/vault.yml` to push your SSH public key to root on every host via `sshpass` + `ssh-copy-id`. Run this once before `setup-ansibleuser.yml`.
@@ -511,6 +652,44 @@ All settings that control the Debian installer and post-install baseline:
 | `collections_paths` | `./collections:...` | Looks in local `collections/` folder first |
 | `ControlMaster=auto` | SSH option | Reuses SSH connections across tasks |
 | `ControlPersist=60s` | SSH option | Keeps connection alive for 60 s between tasks |
+
+---
+
+## LXC Definitions — `lxcs.yml`
+
+`group_vars/all/lxcs.yml` is the **single source of truth** for all LXC containers. Each entry in the `lxcs:` list defines one container. The `create-lxc-proxmox.yml` playbook merges these with `lxc_defaults` — any field omitted in `lxcs.yml` uses the default.
+
+### Minimum entry
+
+```yaml
+- name: lxc-mycontainer
+  vmid: 120
+  hostname: lxc-mycontainer
+  ip: "192.168.0.250/24"
+```
+
+### Full field reference
+
+| Field | Default | Description |
+|---|---|---|
+| `vmid` | — | ✅ Required. Proxmox container ID (must be unique) |
+| `hostname` | — | ✅ Required. Container hostname |
+| `ip` | — | ✅ Required. Static IP in CIDR notation (`x.x.x.x/24`) |
+| `cores` | `1` | vCPU count |
+| `memory` | `512` | RAM in MiB |
+| `swap` | `512` | Swap in MiB |
+| `rootfs_size_gb` | `8` | Root filesystem size in GB |
+| `storage` | `local-lvm` | Proxmox storage pool for the rootfs |
+| `replicate` | `0` | Disk replication (`0` = off, `1` = on) |
+| `onboot` | `true` | Auto-start with Proxmox host |
+| `unprivileged` | `true` | Run as unprivileged container (recommended) |
+| `ostemplate` | `debian-13-standard` | CT template (must exist on the node) |
+| `gateway` | `192.168.0.1` | Default gateway |
+| `nameserver` | `192.168.0.1` | DNS server |
+| `bridge` | `vmbr0` | Network bridge |
+| `iface_name` | `eno1` | Interface name inside the container. Debian 12/13 LXCs use `eno1` (predictable names). |
+| `features` | `[]` | Extra LXC features. **`nesting=1` is required on Debian 13 (systemd 257)** — without it `systemd-networkd` fails to start and the container loses its IP. |
+| `description` | `Managed by Ansible` | Container description shown in Proxmox UI |
 
 ---
 
@@ -591,8 +770,8 @@ All settings that control the Debian installer and post-install baseline:
 | Group | Used by | Contents |
 |---|---|---|
 | `[proxmox-bms]` | Most playbooks | Proxmox bare-metal server(s) |
-| `[lxcs]` | `update_upgrade.yml`, `setup-ansibleuser.yml` | LXC containers |
-| `[vms]` | `update_upgrade.yml`, `setup-ansibleuser.yml` | Running VMs |
+| `[lxcs]` | `update_upgrade.yml`, `setup-ansibleuser.yml`, `wazuh_agent_deploy.yml` | LXC containers |
+| `[vms]` | `update_upgrade.yml`, `setup-ansibleuser.yml`, `wazuh_agent_deploy.yml` | Running VMs |
 | `[new-debian-vms]` | `setup-debian-base.yml` | Freshly installed VMs (temporary) |
 
 Each host line:

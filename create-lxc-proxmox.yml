@@ -1,0 +1,296 @@
+# create-lxc-proxmox.yml
+# Create and manage LXC containers on Proxmox via the REST API (API-first, no SSH to node).
+#
+# Overview
+#   Idempotent LXC provisioning in the same spirit as create-vm-from-iso-proxmox.yml.
+#   Reads container definitions from group_vars/all/lxcs.yml, merges with lxc_defaults,
+#   and creates containers via the community.proxmox.proxmox module.
+#
+# What this playbook does
+#   * Merges per-LXC settings with sensible defaults
+#   * Creates container shells (hostname, CPU, RAM, rootfs, network, SSH key)
+#   * Optionally starts containers after creation
+#   * Optionally removes containers (tagged: removeLXCs)
+#
+# Prerequisites
+#   1. A CT template must exist on the Proxmox node before running.
+#      Download via the Proxmox UI (node → local → CT Templates → Download)
+#      or via shell on the Proxmox node:
+#        pveam update
+#        pveam available --section system | grep debian
+#      Available templates on this node:
+#        local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst
+#        local:vztmpl/ubuntu-25.04-standard_25.04-1.1_amd64.tar.zst
+#      Adjust lxc_defaults.ostemplate below or set ostemplate per-LXC in lxcs.yml.
+#
+#   2. Proxmox API token with LXC privileges defined in group_vars/all/main.yml.
+#
+#   3. LXC definitions in group_vars/all/lxcs.yml (vmid, hostname, ip required per LXC).
+#
+# First-time order after container creation
+#   1. Set vault_lxc_root_password in group_vars/all/main.yml (encrypt with
+#        ansible-vault encrypt_string 'yourpassword' --name 'vault_lxc_root_password')
+#   2. Run this playbook (creates and starts containers):
+#        ansible-playbook create-lxc-proxmox.yml --tags createLXCs,startLXCs
+#   3. Bootstrap ansibleuser (SSH key was injected at creation — no --ask-pass needed):
+#        ansible-playbook setup-ansibleuser.yml --limit lxcs -u root
+#   4. Deploy service-specific playbooks (e.g. setup-lxc-2fa-master.yml)
+#
+# To set root password on already-running containers (e.g. created without a password):
+#        ansible-playbook create-lxc-proxmox.yml --tags setRootPasswordLXCs
+#   (limit to one container: --limit is not applicable since this runs on localhost;
+#    filter by vmid by editing the task's `when` or run it then verify with pct enter)
+#
+# Task tags
+#   createLXCs           — create container shells (idempotent); sets root password
+#   updateLXCs           — apply spec changes from lxcs.yml to existing containers (cores, memory, swap,
+#                          onboot, features, description). Does NOT resize rootfs or change IP.
+#   setRootPasswordLXCs  — set/rotate root password on existing containers via Proxmox API
+#   startLXCs            — start containers after creation
+#   stopLXCs             — stop containers (never tag; must be explicit)
+#   removeLXCs           — destroy containers + rootfs (never tag; must be explicit)
+#
+# Usage
+#   ansible-playbook create-lxc-proxmox.yml --tags createLXCs
+#   ansible-playbook create-lxc-proxmox.yml --tags createLXCs,startLXCs
+#   ansible-playbook create-lxc-proxmox.yml --tags updateLXCs
+#   ansible-playbook create-lxc-proxmox.yml --limit lxc-grafana --tags updateLXCs
+#   ansible-playbook create-lxc-proxmox.yml --tags removeLXCs   # DESTRUCTIVE
+#   ansible-playbook create-lxc-proxmox.yml --limit lxc-grafana --tags createLXCs
+#
+# Credit: Thomas Mozdren
+---
+- name: Manage LXC containers via Proxmox API
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars_files:
+  - group_vars/all/lxcs.yml
+
+  vars:
+    pm_node: "{{ lookup('env', 'PM_NODE')           | default('starhaven', true) }}"
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST')       | default('192.168.0.222', true) }}"
+    pm_api_user: "{{ lookup('env', 'PM_API_USER')       | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID')   | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+    # ------------------------------------------------------------------ #
+    # Global LXC defaults — override per-container in lxcs.yml           #
+    # ------------------------------------------------------------------ #
+    lxc_defaults:
+      # CT template to use (must exist on the Proxmox node — see Prerequisites)
+      ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
+      cores: 1
+      memory: 512 # MiB
+      swap: 512 # MiB
+      rootfs_size_gb: 8
+      storage: "local-lvm"
+      replicate: 0  # 0 = do not replicate rootfs (default for single-node homelab)
+      gateway: "192.168.0.1"
+      nameserver: "192.168.0.1"
+      searchdomain: "lan"
+      bridge: "vmbr0"
+      # Interface name as seen inside the container.
+      # Debian 12/13 LXCs on Proxmox use eno1 (predictable network names).
+      iface_name: "eno1"
+      onboot: true
+      unprivileged: true # unprivileged containers are more secure
+      start: false # do not auto-start after creation (use startLXCs tag)
+      pubkey: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+      # Features needed for most service containers; override per-LXC if needed
+      # nesting=1 required for Docker inside LXC; omit if not needed
+      features: []
+      description: >-
+        Managed by Ansible
+
+        Source: ansible-proxmox Do not edit manually.
+
+  tasks:
+
+  # ------------------------------------------------------------------ #
+  # 0) Normalize — merge defaults into each LXC definition             #
+  # ------------------------------------------------------------------ #
+  # Each task uses `| default(lxc_defaults.xxx)` inline, so lxcs_merged is
+  # simply the raw list — item fields take priority in every task parameter.
+  - name: Set lxcs_merged (item values override lxc_defaults inline per task)
+    ansible.builtin.set_fact:
+      lxcs_merged: "{{ lxcs }}"
+    tags: [ always ]
+
+  # ------------------------------------------------------------------ #
+  # 1) Create LXC container shells                                      #
+  # ------------------------------------------------------------------ #
+  - name: Create LXC containers
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      hostname: "{{ item.hostname }}"
+      ostemplate: "{{ item.ostemplate    | default(lxc_defaults.ostemplate) }}"
+      cores: "{{ item.cores         | default(lxc_defaults.cores) }}"
+      memory: "{{ item.memory        | default(lxc_defaults.memory) }}"
+      swap: "{{ item.swap          | default(lxc_defaults.swap) }}"
+      disk_volume:
+        storage: "{{ item.storage    | default(lxc_defaults.storage) }}"
+        size: "{{ item.rootfs_size_gb | default(lxc_defaults.rootfs_size_gb) }}"
+        options: "replicate={{ item.replicate | default(lxc_defaults.replicate) }}"
+      netif:
+        net0: >-
+          name={{ item.iface_name | default(lxc_defaults.iface_name) }},bridge={{ item.bridge | default(lxc_defaults.bridge) }},ip={{ item.ip }},gw={{ item.gateway | default(lxc_defaults.gateway) }}
+      nameserver: "{{ item.nameserver    | default(lxc_defaults.nameserver) }}"
+      searchdomain: "{{ item.searchdomain  | default(lxc_defaults.searchdomain) }}"
+      pubkey: "{{ item.pubkey        | default(lxc_defaults.pubkey) }}"
+      password: "{{ vault_lxc_root_password }}"
+      onboot: "{{ item.onboot        | default(lxc_defaults.onboot) }}"
+      unprivileged: "{{ item.unprivileged  | default(lxc_defaults.unprivileged) }}"
+      description: "{{ item.description   | default(lxc_defaults.description) }}"
+      features: "{{ item.features      | default(lxc_defaults.features) }}"
+      state: present
+      update: false  # never modify existing containers — create-only
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }} (vmid={{ item.vmid }})"
+    throttle: 4
+    ignore_errors: true  # skip VMIDs already taken by existing VMs/containers
+    tags: [ lxcs, createLXCs ]
+
+  # ------------------------------------------------------------------ #
+  # 2) Update existing container specs (--tags updateLXCs)             #
+  #    Applies cores/memory/swap/onboot/features/description changes   #
+  #    from lxcs.yml to already-running containers. Safe on live CTs.  #
+  #    Does NOT resize rootfs or change IP/network config.             #
+  # ------------------------------------------------------------------ #
+  - name: Update LXC container specs
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      hostname: "{{ item.hostname }}"
+      cores: "{{ item.cores         | default(lxc_defaults.cores) }}"
+      memory: "{{ item.memory        | default(lxc_defaults.memory) }}"
+      swap: "{{ item.swap          | default(lxc_defaults.swap) }}"
+      onboot: "{{ item.onboot        | default(lxc_defaults.onboot) }}"
+      features: "{{ item.features      | default(lxc_defaults.features) }}"
+      description: "{{ item.description   | default(lxc_defaults.description) }}"
+      state: present
+      update: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }} (vmid={{ item.vmid }})"
+    throttle: 4
+    tags: [ never, updateLXCs ]
+
+  # ------------------------------------------------------------------ #
+  # 3) Set / rotate root password on existing containers               #
+  #    Useful for containers created before vault_lxc_root_password    #
+  #    was defined, or to rotate the password across all containers.   #
+  #    Run: ansible-playbook create-lxc-proxmox.yml --tags setRootPasswordLXCs
+  # ------------------------------------------------------------------ #
+  - name: Set root password on existing LXC containers
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      hostname: "{{ item.hostname }}"
+      password: "{{ vault_lxc_root_password }}"
+      state: present
+      update: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }} (vmid={{ item.vmid }})"
+    throttle: 4
+    tags: [ never, setRootPasswordLXCs ]
+
+  # ------------------------------------------------------------------ #
+  # 4) Start containers (optional — use --tags startLXCs)              #
+  # ------------------------------------------------------------------ #
+  - name: Start LXC containers
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      state: started
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }}"
+    throttle: 4
+    ignore_errors: true  # skip VMIDs already taken by existing VMs/containers
+    tags: [ never, startLXCs ]
+
+  # ------------------------------------------------------------------ #
+  # 4) Stop containers (tagged 'never' — must be explicitly requested)  #
+  # ------------------------------------------------------------------ #
+  - name: Stop LXC containers
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      state: stopped
+      force: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }}"
+    failed_when: false # already stopped is fine
+    throttle: 4
+    tags: [ never, stopLXCs ]
+
+  # ------------------------------------------------------------------ #
+  # 5) Remove containers — DESTRUCTIVE; tagged 'never' for safety       #
+  #    Stops and deletes each container including its rootfs disk.      #
+  #    Run explicitly: --tags removeLXCs                                #
+  # ------------------------------------------------------------------ #
+  - name: Stop LXC containers before removal
+    community.proxmox.proxmox:
+      node: "{{ pm_node }}"
+      vmid: "{{ item.vmid }}"
+      state: stopped
+      force: true
+      api_host: "{{ pm_api_host }}"
+      api_user: "{{ pm_api_user }}"
+      api_token_id: "{{ pm_api_token_id }}"
+      api_token_secret: "{{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }}"
+    failed_when: false
+    tags: [ never, removeLXCs ]
+
+  - name: Remove LXC containers and rootfs disks
+    ansible.builtin.uri:
+      url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/lxc/{{ item.vmid }}?purge=1&destroy-unreferenced-disks=1"
+      method: DELETE
+      headers:
+        Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [ 200, 500 ]
+    register: _lxc_delete_result
+    failed_when: >
+      _lxc_delete_result.status not in [200, 500] or (_lxc_delete_result.status == 500 and
+       'does not exist' not in (_lxc_delete_result.json.errors | default({}) | string))
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }}"
+    tags: [ never, removeLXCs ]

@@ -1,0 +1,23 @@
+---
+# host_vars/vm-debian-media-server/main.yml
+
+# Add media alongside the default ansibleuser/cartman so CIS AllowUsers permits them.
+# AllowUsers is built as: "ansibleuser <vm_enduser_name> <cis_ssh_extra_users>"
+cis_ssh_extra_users: "media"
+
+# Allow password auth for media user via a Match block (CIS disables it globally).
+cis_sftp_password_users: "media"
+
+cis_ufw_extra_ports:
+- { port: "8096", proto: "tcp", comment: "Jellyfin web UI" }
+- { port: "21", proto: "tcp", comment: "vsftpd FTP control" }
+- { port: "40000:40100", proto: "tcp", comment: "vsftpd FTP passive data" }
+
+cis_preserve_services:
+- ssh
+- sshd
+- qemu-guest-agent
+- ufw
+- auditd
+- apparmor
+- vsftpd

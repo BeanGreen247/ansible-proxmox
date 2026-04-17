@@ -1,0 +1,112 @@
+# group_vars/all/lxcs.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# LXC container definitions consumed by create-lxc-proxmox.yml.
+#
+# Each entry maps one-to-one with a container in [lxcs] inventory group.
+# Fields not specified here are filled from lxc_defaults in the playbook.
+#
+# Required per-LXC (no defaults exist for these):
+#   vmid         - Proxmox container ID (must be unique in the cluster)
+#   hostname     - container hostname
+#   ip           - static IP in CIDR notation (e.g. 192.168.0.242/24)
+#
+# Common optional overrides (all have sane defaults):
+#   cores, memory, swap, rootfs_size_gb, onboot, unprivileged
+#   description, features
+#
+# Storage override:
+#   storage      - Proxmox storage pool for the rootfs subvolume.
+#                  Defaults to lxc_defaults.storage ("local-lvm") in the playbook.
+#                  Override per-LXC if you want a different pool (e.g. "local", "ceph-pool").
+#                  Example:
+#                    storage: "local"
+#
+# Replication:
+#   replicate    - Whether Proxmox should replicate the rootfs disk (0 = off, 1 = on).
+#                  Defaults to 0 (off) — correct for single-node homelabs.
+#                  Example:
+#                    replicate: 1
+#
+# ostemplate:
+#   The CT template must exist on the Proxmox node before running.
+#   Download it first via the Proxmox UI (node → local → CT Templates → Download)
+#   or via the shell: pveam download local debian-12-standard_12.7-1_amd64.tar.zst
+#   The default template is set in lxc_defaults inside the playbook.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+lxcs:
+
+# New LXC — first free vmid on the node is 116
+- name: lxc-2fa-master
+  vmid: 116
+  hostname: lxc-2fa-master
+  ip: "192.168.0.242/24"
+  cores: 2
+  memory: 1024
+  swap: 512
+  rootfs_size_gb: 8
+  storage: "vm-8tb-hdd0"
+  description: "Nginx + Authelia TOTP reverse-proxy gateway"
+
+# Existing LXCs — vmids match what is actually on the Proxmox node.
+# These are here for documentation/idempotency; re-running create-lxc-proxmox.yml
+# against them is a no-op (state: present on an existing container).
+- name: lxc-wazuh
+  vmid: 115
+  hostname: lxc-wazuh
+  ip: "192.168.0.243/24"
+  cores: 4
+  memory: 8192
+  swap: 1024
+  rootfs_size_gb: 60
+  storage: "vm-8tb-hdd0"
+  features: [ "nesting=1" ] # required for systemd 257 credentials in LXC
+  description: "Wazuh SIEM — manager, indexer, dashboard"
+
+- name: lxc-optiping
+  vmid: 110
+  hostname: lxc-optiping
+  ip: "192.168.0.244/24"
+  cores: 1
+  memory: 1024
+  swap: 256
+  rootfs_size_gb: 8
+  storage: "vm-8tb-hdd0"
+  description: "Optiping latency monitor"
+
+- name: lxc-proxexport
+  vmid: 108
+  hostname: lxc-proxexport
+  ip: "192.168.0.246/24"
+  cores: 1
+  memory: 1024
+  swap: 256
+  rootfs_size_gb: 8
+  storage: "vm-8tb-hdd0"
+  features: [ "nesting=1" ]
+  description: "Proxmox metrics exporter (prometheus-pve-exporter)"
+
+- name: lxc-grafana
+  vmid: 107
+  hostname: lxc-grafana
+  ip: "192.168.0.247/24"
+  cores: 2
+  memory: 1024
+  swap: 512
+  rootfs_size_gb: 8
+  storage: "vm-8tb-hdd0"
+  features: [ "nesting=1" ]
+  description: "Grafana dashboard server"
+
+- name: lxc-prometheus
+  vmid: 105
+  hostname: lxc-prometheus
+  ip: "192.168.0.248/24"
+  cores: 2
+  memory: 1024
+  swap: 512
+  rootfs_size_gb: 8
+  storage: "vm-8tb-hdd0"
+  features: [ "nesting=1" ]
+  description: "Prometheus metrics collection"

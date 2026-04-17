@@ -1,0 +1,6 @@
+---
+# host_vars/vm-debian-ut2004-server/main.yml
+
+cis_ufw_extra_ports:
+- { port: "8075", proto: "tcp", comment: "UT2004 game server" }
+- { port: "8075", proto: "udp", comment: "UT2004 game server (UDP)" }

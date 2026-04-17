@@ -31,7 +31,6 @@
 #             "iso_file":"debian-13.1.0-amd64-netinst.iso"}'
 #
 # Credit: Thomas Mozdren
-
 ---
 # PLAY fetch ISO onto the Proxmox node over SSH, if needed and tag checkIso is called
 # TODO: make it take data from vms.yml for desired iso
@@ -40,30 +39,31 @@
   hosts: proxmox-bms
   become: true
   gather_facts: false
+  ignore_unreachable: true
   vars:
     iso_dir: "/var/lib/vz/template/iso"
   tasks:
-    - name: Create ISO directory if needed
-      ansible.builtin.file:
-        path: "{{ iso_dir }}"
-        state: directory
-        mode: "0755"
-      tags: [always]
+  - name: Create ISO directory if needed
+    ansible.builtin.file:
+      path: "{{ iso_dir }}"
+      state: directory
+      mode: "0755"
+    tags: [ always ]
 
-    - name: Download ISO if missing
-      ansible.builtin.get_url:
-        url: "{{ iso_url }}"
-        dest: "{{ iso_dir }}/{{ iso_file }}"
-        mode: "0644"
-        force: false
-      register: result
-      tags: [always]
+  - name: Download ISO if missing
+    ansible.builtin.get_url:
+      url: "{{ iso_url }}"
+      dest: "{{ iso_dir }}/{{ iso_file }}"
+      mode: "0644"
+      force: false
+    register: result
+    tags: [ always ]
 
-    - name: Print status of ISO download
-      ansible.builtin.debug:
-        msg:
-          - "Changed: {{ result.changed }}"
-          - "Downloaded to: {{ result.dest | default('n/a') }}"
-          - "URL: {{ result.url | default(iso_url) }}"
-          - "Size (bytes): {{ result.size | default('unknown') }}"
-      tags: [always]
+  - name: Print status of ISO download
+    ansible.builtin.debug:
+      msg:
+      - "Changed: {{ result.changed }}"
+      - "Downloaded to: {{ result.dest | default('n/a') }}"
+      - "URL: {{ result.url | default(iso_url) }}"
+      - "Size (bytes): {{ result.size | default('unknown') }}"
+    tags: [ always ]

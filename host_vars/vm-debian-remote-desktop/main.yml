@@ -1,0 +1,8 @@
+---
+# host_vars/vm-debian-remote-desktop/main.yml
+
+cis_ufw_extra_ports:
+- { port: "5901", proto: "tcp", comment: "VNC / TigerVNC remote desktop" }
+- { port: "8080", proto: "tcp", comment: "Docker reverse proxy" }
+# CUPS (631) is loopback-only — no UFW rule needed.
+# Tailscale and Cloudflare tunnel handle their own connectivity.

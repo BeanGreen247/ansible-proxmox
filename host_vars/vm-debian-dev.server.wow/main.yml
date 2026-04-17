@@ -1,0 +1,12 @@
+---
+# host_vars/vm-debian-dev.server.wow/main.yml
+
+cis_ufw_extra_ports:
+- { port: "80", proto: "tcp", comment: "Apache web server" }
+- { port: "65527", proto: "tcp", comment: "Glances system monitor" }
+- { port: "65528", proto: "tcp", comment: "Docker service" }
+- { port: "65529", proto: "tcp", comment: "Docker service" }
+- { port: "65530", proto: "tcp", comment: "Python service" }
+- { port: "65532", proto: "tcp", comment: "Docker service" }
+# MySQL (3306) is loopback-only — no UFW rule needed.
+# ZeroTier (9993) manages its own tunneled connectivity.

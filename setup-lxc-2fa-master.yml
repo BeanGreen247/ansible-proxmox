@@ -1,0 +1,333 @@
+---
+# setup-lxc-2fa-master.yml
+# Installs Nginx + Authelia on lxc-2fa-master as a TOTP reverse-proxy gateway.
+#
+# Architecture
+#   Browser → lxc-2fa-master:443 (Nginx) → Authelia TOTP portal (127.0.0.1:9091)
+#                                       → backend service (Wazuh, Grafana, etc.)
+#
+#   Backend services remain on their existing IPs/ports and are never exposed
+#   directly. All TOTP auth is enforced at the Nginx layer via auth_request.
+#
+# First-time setup order
+#   1. Create lxc-2fa-master container in Proxmox (Debian 13, 192.168.0.242)
+#   2. Bootstrap ansibleuser:
+#        ansible-playbook setup-ansibleuser.yml --limit lxc-2fa-master -u root --ask-pass
+#   3. Fill in host_vars/lxc-2fa-master/vault.yml and encrypt it:
+#        ansible-vault encrypt host_vars/lxc-2fa-master/vault.yml
+#   4. Generate an Argon2 password hash for your Authelia user:
+#        authelia crypto hash generate argon2 --password 'yourpassword'
+#      Paste the output ($argon2id$...) as vault_authelia_user_password_hash in vault.yml
+#   5. Run this playbook:
+#        ansible-playbook setup-lxc-2fa-master.yml
+#   6. Add DNS entries to your router / Pi-hole / dnsmasq for each service hostname
+#      pointing to 192.168.0.242:
+#        auth.lan    → 192.168.0.242
+#        wazuh.lan   → 192.168.0.242
+#        grafana.lan → 192.168.0.242
+#   7. Browse to https://auth.lan, register TOTP in the Authelia portal.
+#
+# Adding / removing protected services
+#   Edit authelia_services below, then re-run this playbook.
+#
+# Usage
+#   ansible-playbook setup-lxc-2fa-master.yml
+#   ansible-playbook setup-lxc-2fa-master.yml --tags nginx    # nginx only
+#   ansible-playbook setup-lxc-2fa-master.yml --tags authelia # authelia only
+
+- name: Install Nginx + Authelia TOTP gateway on lxc-2fa-master
+  hosts: lxc-2fa-master
+  gather_facts: true
+  become: true
+  ignore_unreachable: true
+
+  vars:
+    # ------------------------------------------------------------------ #
+    # Domain / hostnames                                                   #
+    # ------------------------------------------------------------------ #
+    # Local DNS domain used for all service hostnames.
+    # Add A records to your router, Pi-hole, or dnsmasq pointing each
+    # hostname to 192.168.0.242 (lxc-2fa-master).
+    authelia_domain: "lan"
+
+    # Hostname of the Authelia TOTP portal itself (auth.lan by default).
+    authelia_auth_hostname: "auth"
+
+    # ------------------------------------------------------------------ #
+    # Protected services                                                   #
+    # ------------------------------------------------------------------ #
+    # Each entry generates an Nginx vhost that requires TOTP to access.
+    #   name            - used for the config filename
+    #   hostname        - DNS hostname (without domain) users browse to
+    #   backend         - upstream URL (IP:port on your LAN)
+    #   backend_ssl_verify - set false if the backend uses a self-signed cert
+    authelia_services:
+    - name: wazuh
+      hostname: wazuh
+      backend: "https://192.168.0.243:443"
+      backend_ssl_verify: false # Wazuh uses a self-signed cert
+    - name: grafana
+      hostname: grafana
+      backend: "http://192.168.0.247:3000"
+      backend_ssl_verify: true
+    # ------------------------------------------------------------------ #
+    # Authelia user account                                                #
+    # ------------------------------------------------------------------ #
+    # Username for the Authelia internal user database.
+    # Password hash must be set in host_vars/lxc-2fa-master/vault.yml.
+    authelia_username: "admin"
+    authelia_display_name: "Admin"
+    authelia_user_email: "admin@lan"
+
+    # ------------------------------------------------------------------ #
+    # Authelia internals                                                   #
+    # ------------------------------------------------------------------ #
+    authelia_totp_issuer: "{{ authelia_auth_hostname }}.{{ authelia_domain }}"
+    authelia_config_dir: "/etc/authelia"
+    authelia_data_dir: "/var/lib/authelia"
+    authelia_log_dir: "/var/log/authelia"
+    authelia_tls_dir: "/etc/nginx/ssl"
+
+  # vault vars expected from host_vars/lxc-2fa-master/vault.yml:
+  #   vault_become_password
+  #   vault_authelia_jwt_secret              (32+ random chars)
+  #   vault_authelia_session_secret          (32+ random chars)
+  #   vault_authelia_storage_encryption_key  (32+ random chars)
+  #   vault_authelia_user_password_hash      ($argon2id$... from authelia crypto hash)
+
+  tasks:
+
+  # ------------------------------------------------------------------ #
+  # APT prerequisites                                                    #
+  # ------------------------------------------------------------------ #
+
+  - name: "[apt] Update cache and install prerequisites"
+    ansible.builtin.apt:
+      name:
+      - curl
+      - gnupg
+      - apt-transport-https
+      - ca-certificates
+      - openssl
+      - nginx-full   # nginx-full includes ngx_http_auth_request_module (required)
+      state: present
+      update_cache: true
+    tags: [ apt, nginx, authelia ]
+
+  # ------------------------------------------------------------------ #
+  # Authelia — install from official APT repo                           #
+  # ------------------------------------------------------------------ #
+
+  - name: "[authelia] Download Authelia GPG signing key"
+    ansible.builtin.get_url:
+      url: https://www.authelia.com/keys/authelia-security.gpg
+      dest: /usr/share/keyrings/authelia-security.gpg
+      mode: "0644"
+    tags: [ apt, authelia ]
+
+  - name: "[authelia] Add Authelia APT repository"
+    ansible.builtin.apt_repository:
+      repo: >-
+        deb [arch=amd64 signed-by=/usr/share/keyrings/authelia-security.gpg] https://apt.authelia.com stable main
+      filename: authelia
+      state: present
+      update_cache: true
+    tags: [ apt, authelia ]
+
+  - name: "[authelia] Install authelia package"
+    ansible.builtin.apt:
+      name: authelia
+      state: present
+    tags: [ apt, authelia ]
+
+  # ------------------------------------------------------------------ #
+  # Authelia — directories                                               #
+  # ------------------------------------------------------------------ #
+
+  - name: "[authelia] Create required directories"
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: directory
+      owner: authelia
+      group: authelia
+      mode: "0750"
+    loop:
+    - "{{ authelia_config_dir }}"
+    - "{{ authelia_data_dir }}"
+    - "{{ authelia_log_dir }}"
+    tags: [ authelia ]
+
+  # ------------------------------------------------------------------ #
+  # Authelia — configuration                                             #
+  # ------------------------------------------------------------------ #
+
+  - name: "[authelia] Template configuration.yml"
+    ansible.builtin.template:
+      src: templates/authelia/configuration.yml.j2
+      dest: "{{ authelia_config_dir }}/configuration.yml"
+      owner: authelia
+      group: authelia
+      mode: "0640"
+    notify: Restart authelia
+    tags: [ authelia ]
+
+  - name: "[authelia] Template users_database.yml"
+    ansible.builtin.template:
+      src: templates/authelia/users_database.yml.j2
+      dest: "{{ authelia_config_dir }}/users_database.yml"
+      owner: authelia
+      group: authelia
+      mode: "0640"
+    notify: Restart authelia
+    tags: [ authelia ]
+
+  # ------------------------------------------------------------------ #
+  # Authelia — systemd service                                           #
+  # ------------------------------------------------------------------ #
+
+  - name: "[authelia] Enable and start authelia"
+    ansible.builtin.systemd:
+      name: authelia
+      enabled: true
+      state: started
+      daemon_reload: true
+    tags: [ authelia ]
+
+  # ------------------------------------------------------------------ #
+  # TLS — self-signed certificate for Nginx                              #
+  # ------------------------------------------------------------------ #
+
+  - name: "[tls] Create TLS directory"
+    ansible.builtin.file:
+      path: "{{ authelia_tls_dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: "0755"
+    tags: [ nginx, tls ]
+
+  - name: "[tls] Check if self-signed cert already exists"
+    ansible.builtin.stat:
+      path: "{{ authelia_tls_dir }}/authelia.crt"
+    register: _tls_cert
+    tags: [ nginx, tls ]
+
+  - name: "[tls] Generate self-signed cert (valid 3650 days)"
+    ansible.builtin.command:
+      cmd: >
+        openssl req -x509 -nodes -days 3650
+          -newkey rsa:4096
+          -keyout {{ authelia_tls_dir }}/authelia.key
+          -out    {{ authelia_tls_dir }}/authelia.crt
+          -subj "/CN={{ authelia_auth_hostname }}.{{ authelia_domain }}/O=Homelab/C=US"
+          -addext "subjectAltName=DNS:{{ authelia_auth_hostname }}.{{ authelia_domain }},{% for svc in authelia_services %}DNS:{{ svc.hostname }}.{{ authelia_domain }}{% if not loop.last %},{% endif %}{% endfor %}"
+    when: not _tls_cert.stat.exists
+    notify: Reload nginx
+    tags: [ nginx, tls ]
+
+  - name: "[tls] Restrict private key permissions"
+    ansible.builtin.file:
+      path: "{{ authelia_tls_dir }}/authelia.key"
+      owner: root
+      group: www-data
+      mode: "0640"
+    tags: [ nginx, tls ]
+
+  # ------------------------------------------------------------------ #
+  # Nginx — configuration                                                #
+  # ------------------------------------------------------------------ #
+
+  - name: "[nginx] Remove default site"
+    ansible.builtin.file:
+      path: /etc/nginx/sites-enabled/default
+      state: absent
+    notify: Reload nginx
+    tags: [ nginx ]
+
+  - name: "[nginx] Template auth portal vhost (auth.lan → Authelia)"
+    ansible.builtin.template:
+      src: templates/nginx/authelia-auth-portal.conf.j2
+      dest: /etc/nginx/sites-available/authelia-auth-portal.conf
+      owner: root
+      group: root
+      mode: "0644"
+    notify: Reload nginx
+    tags: [ nginx ]
+
+  - name: "[nginx] Enable auth portal vhost"
+    ansible.builtin.file:
+      src: /etc/nginx/sites-available/authelia-auth-portal.conf
+      dest: /etc/nginx/sites-enabled/authelia-auth-portal.conf
+      state: link
+    notify: Reload nginx
+    tags: [ nginx ]
+
+  - name: "[nginx] Template per-service vhosts"
+    ansible.builtin.template:
+      src: templates/nginx/authelia-service-vhost.conf.j2
+      dest: "/etc/nginx/sites-available/{{ item.name }}.conf"
+      owner: root
+      group: root
+      mode: "0644"
+    loop: "{{ authelia_services }}"
+    loop_control:
+      label: "{{ item.name }}"
+    notify: Reload nginx
+    tags: [ nginx ]
+
+  - name: "[nginx] Enable per-service vhosts"
+    ansible.builtin.file:
+      src: "/etc/nginx/sites-available/{{ item.name }}.conf"
+      dest: "/etc/nginx/sites-enabled/{{ item.name }}.conf"
+      state: link
+    loop: "{{ authelia_services }}"
+    loop_control:
+      label: "{{ item.name }}"
+    notify: Reload nginx
+    tags: [ nginx ]
+
+  - name: "[nginx] Validate config before enabling"
+    ansible.builtin.command:
+      cmd: nginx -t
+    changed_when: false
+    tags: [ nginx ]
+
+  - name: "[nginx] Enable and start nginx"
+    ansible.builtin.systemd:
+      name: nginx
+      enabled: true
+      state: started
+    tags: [ nginx ]
+
+  # ------------------------------------------------------------------ #
+  # Summary                                                              #
+  # ------------------------------------------------------------------ #
+
+  - name: "Setup complete"
+    ansible.builtin.debug:
+      msg: |
+        Authelia TOTP gateway is ready.
+
+        Add these A records to your local DNS (Pi-hole / router / dnsmasq):
+          auth.lan    → 192.168.0.242
+        {% for svc in authelia_services %}
+          {{ svc.hostname }}.{{ authelia_domain }}  → 192.168.0.242
+        {% endfor %}
+
+        First login:
+          1. Browse to https://auth.{{ authelia_domain }}
+          2. Log in as {{ authelia_username }} with your password
+          3. Register your TOTP app (scan the QR code)
+          4. Browse to any protected service — you will be redirected to auth.{{ authelia_domain }}
+    tags: [ always ]
+
+  handlers:
+  - name: Restart authelia
+    ansible.builtin.systemd:
+      name: authelia
+      state: restarted
+
+  - name: Reload nginx
+    ansible.builtin.systemd:
+      name: nginx
+      state: reloaded

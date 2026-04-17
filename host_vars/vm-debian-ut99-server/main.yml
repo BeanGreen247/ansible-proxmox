@@ -1,0 +1,6 @@
+---
+# host_vars/vm-debian-ut99-server/main.yml
+
+cis_ufw_extra_ports:
+- { port: "8076", proto: "tcp", comment: "UT99 game server" }
+- { port: "8076", proto: "udp", comment: "UT99 game server (UDP)" }

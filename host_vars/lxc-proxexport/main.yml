@@ -1,0 +1,6 @@
+---
+# host_vars/lxc-proxexport/main.yml
+
+cis_ufw_extra_ports:
+- { port: "9100", proto: "tcp", comment: "node_exporter" }
+- { port: "9221", proto: "tcp", comment: "Proxmox exporter" }
