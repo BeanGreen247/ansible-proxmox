@@ -28,27 +28,19 @@
 #   3. LXC definitions in group_vars/all/lxcs.yml (vmid, hostname, ip required per LXC).
 #
 # First-time order after container creation
-#   1. Set vault_lxc_root_password in group_vars/all/main.yml (encrypt with
-#        ansible-vault encrypt_string 'yourpassword' --name 'vault_lxc_root_password')
-#   2. Run this playbook (creates and starts containers):
+#   1. Run this playbook (creates and starts containers):
 #        ansible-playbook create-lxc-proxmox.yml --tags createLXCs,startLXCs
-#   3. Bootstrap ansibleuser (SSH key was injected at creation — no --ask-pass needed):
+#   2. Bootstrap ansibleuser (SSH key was injected at creation — no --ask-pass needed):
 #        ansible-playbook setup-ansibleuser.yml --limit lxcs -u root
-#   4. Deploy service-specific playbooks (e.g. setup-lxc-2fa-master.yml)
-#
-# To set root password on already-running containers (e.g. created without a password):
-#        ansible-playbook create-lxc-proxmox.yml --tags setRootPasswordLXCs
-#   (limit to one container: --limit is not applicable since this runs on localhost;
-#    filter by vmid by editing the task's `when` or run it then verify with pct enter)
+#   3. Deploy service-specific playbooks
 #
 # Task tags
-#   createLXCs           — create container shells (idempotent); sets root password
-#   updateLXCs           — apply spec changes from lxcs.yml to existing containers (cores, memory, swap,
-#                          onboot, features, description). Does NOT resize rootfs or change IP.
-#   setRootPasswordLXCs  — set/rotate root password on existing containers via Proxmox API
-#   startLXCs            — start containers after creation
-#   stopLXCs             — stop containers (never tag; must be explicit)
-#   removeLXCs           — destroy containers + rootfs (never tag; must be explicit)
+#   createLXCs  — create container shells (idempotent)
+#   updateLXCs  — apply spec changes from lxcs.yml to existing containers (cores, memory, swap,
+#                 onboot, features, description). Does NOT resize rootfs or change IP.
+#   startLXCs   — start containers after creation
+#   stopLXCs    — stop containers (never tag; must be explicit)
+#   removeLXCs  — destroy containers + rootfs (never tag; must be explicit)
 #
 # Usage
 #   ansible-playbook create-lxc-proxmox.yml --tags createLXCs
@@ -87,7 +79,7 @@
       swap: 512 # MiB
       rootfs_size_gb: 8
       storage: "local-lvm"
-      replicate: 0  # 0 = do not replicate rootfs (default for single-node homelab)
+      replicate: 0 # 0 = do not replicate rootfs (default for single-node homelab)
       gateway: "192.168.0.1"
       nameserver: "192.168.0.1"
       searchdomain: "lan"
@@ -141,13 +133,12 @@
       nameserver: "{{ item.nameserver    | default(lxc_defaults.nameserver) }}"
       searchdomain: "{{ item.searchdomain  | default(lxc_defaults.searchdomain) }}"
       pubkey: "{{ item.pubkey        | default(lxc_defaults.pubkey) }}"
-      password: "{{ vault_lxc_root_password }}"
       onboot: "{{ item.onboot        | default(lxc_defaults.onboot) }}"
       unprivileged: "{{ item.unprivileged  | default(lxc_defaults.unprivileged) }}"
       description: "{{ item.description   | default(lxc_defaults.description) }}"
       features: "{{ item.features      | default(lxc_defaults.features) }}"
       state: present
-      update: false  # never modify existing containers — create-only
+      update: false # never modify existing containers — create-only
       api_host: "{{ pm_api_host }}"
       api_user: "{{ pm_api_user }}"
       api_token_id: "{{ pm_api_token_id }}"
@@ -157,7 +148,7 @@
     loop_control:
       label: "{{ item.hostname }} (vmid={{ item.vmid }})"
     throttle: 4
-    ignore_errors: true  # skip VMIDs already taken by existing VMs/containers
+    ignore_errors: true # skip VMIDs already taken by existing VMs/containers
     tags: [ lxcs, createLXCs ]
 
   # ------------------------------------------------------------------ #
@@ -191,32 +182,7 @@
     tags: [ never, updateLXCs ]
 
   # ------------------------------------------------------------------ #
-  # 3) Set / rotate root password on existing containers               #
-  #    Useful for containers created before vault_lxc_root_password    #
-  #    was defined, or to rotate the password across all containers.   #
-  #    Run: ansible-playbook create-lxc-proxmox.yml --tags setRootPasswordLXCs
-  # ------------------------------------------------------------------ #
-  - name: Set root password on existing LXC containers
-    community.proxmox.proxmox:
-      node: "{{ pm_node }}"
-      vmid: "{{ item.vmid }}"
-      hostname: "{{ item.hostname }}"
-      password: "{{ vault_lxc_root_password }}"
-      state: present
-      update: true
-      api_host: "{{ pm_api_host }}"
-      api_user: "{{ pm_api_user }}"
-      api_token_id: "{{ pm_api_token_id }}"
-      api_token_secret: "{{ pm_api_token_secret }}"
-      validate_certs: "{{ pm_api_validate_certs }}"
-    loop: "{{ lxcs_merged }}"
-    loop_control:
-      label: "{{ item.hostname }} (vmid={{ item.vmid }})"
-    throttle: 4
-    tags: [ never, setRootPasswordLXCs ]
-
-  # ------------------------------------------------------------------ #
-  # 4) Start containers (optional — use --tags startLXCs)              #
+  # 3) Start containers (optional — use --tags startLXCs)              #
   # ------------------------------------------------------------------ #
   - name: Start LXC containers
     community.proxmox.proxmox:
@@ -232,7 +198,7 @@
     loop_control:
       label: "{{ item.hostname }}"
     throttle: 4
-    ignore_errors: true  # skip VMIDs already taken by existing VMs/containers
+    ignore_errors: true # skip VMIDs already taken by existing VMs/containers
     tags: [ never, startLXCs ]
 
   # ------------------------------------------------------------------ #

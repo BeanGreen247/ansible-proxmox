@@ -37,18 +37,6 @@
 
 lxcs:
 
-# New LXC — first free vmid on the node is 116
-- name: lxc-2fa-master
-  vmid: 116
-  hostname: lxc-2fa-master
-  ip: "192.168.0.242/24"
-  cores: 2
-  memory: 1024
-  swap: 512
-  rootfs_size_gb: 8
-  storage: "vm-8tb-hdd0"
-  description: "Nginx + Authelia TOTP reverse-proxy gateway"
-
 # Existing LXCs — vmids match what is actually on the Proxmox node.
 # These are here for documentation/idempotency; re-running create-lxc-proxmox.yml
 # against them is a no-op (state: present on an existing container).
