@@ -68,9 +68,7 @@
     pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID')   | default('ansible-automation', true) }}"
     pm_api_validate_certs: false
 
-    # ------------------------------------------------------------------ #
-    # Global LXC defaults — override per-container in lxcs.yml           #
-    # ------------------------------------------------------------------ #
+    # Global LXC defaults — override per-container in lxcs.yml
     lxc_defaults:
       # CT template to use (must exist on the Proxmox node — see Prerequisites)
       ostemplate: "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst"
@@ -101,9 +99,7 @@
 
   tasks:
 
-  # ------------------------------------------------------------------ #
-  # 0) Normalize — merge defaults into each LXC definition             #
-  # ------------------------------------------------------------------ #
+  # 0) Normalize — merge defaults into each LXC definition
   # Each task uses `| default(lxc_defaults.xxx)` inline, so lxcs_merged is
   # simply the raw list — item fields take priority in every task parameter.
   - name: Set lxcs_merged (item values override lxc_defaults inline per task)
@@ -111,9 +107,7 @@
       lxcs_merged: "{{ lxcs }}"
     tags: [ always ]
 
-  # ------------------------------------------------------------------ #
-  # 1) Create LXC container shells                                      #
-  # ------------------------------------------------------------------ #
+  # 1) Create LXC container shells
   - name: Create LXC containers
     community.proxmox.proxmox:
       node: "{{ pm_node }}"
@@ -151,12 +145,10 @@
     ignore_errors: true # skip VMIDs already taken by existing VMs/containers
     tags: [ lxcs, createLXCs ]
 
-  # ------------------------------------------------------------------ #
-  # 2) Update existing container specs (--tags updateLXCs)             #
-  #    Applies cores/memory/swap/onboot/features/description changes   #
-  #    from lxcs.yml to already-running containers. Safe on live CTs.  #
-  #    Does NOT resize rootfs or change IP/network config.             #
-  # ------------------------------------------------------------------ #
+  # 2) Update existing container specs (--tags updateLXCs)
+  #    Applies cores/memory/swap/onboot/features/description changes
+  #    from lxcs.yml to already-running containers. Safe on live CTs.
+  #    Does NOT resize rootfs or change IP/network config.
   - name: Update LXC container specs
     community.proxmox.proxmox:
       node: "{{ pm_node }}"
@@ -181,9 +173,7 @@
     throttle: 4
     tags: [ never, updateLXCs ]
 
-  # ------------------------------------------------------------------ #
-  # 3) Start containers (optional — use --tags startLXCs)              #
-  # ------------------------------------------------------------------ #
+  # 3) Start containers (optional — use --tags startLXCs)
   - name: Start LXC containers
     community.proxmox.proxmox:
       node: "{{ pm_node }}"
@@ -201,9 +191,7 @@
     ignore_errors: true # skip VMIDs already taken by existing VMs/containers
     tags: [ never, startLXCs ]
 
-  # ------------------------------------------------------------------ #
-  # 4) Stop containers (tagged 'never' — must be explicitly requested)  #
-  # ------------------------------------------------------------------ #
+  # 4) Stop containers (tagged 'never' — must be explicitly requested)
   - name: Stop LXC containers
     community.proxmox.proxmox:
       node: "{{ pm_node }}"
@@ -222,11 +210,9 @@
     throttle: 4
     tags: [ never, stopLXCs ]
 
-  # ------------------------------------------------------------------ #
-  # 5) Remove containers — DESTRUCTIVE; tagged 'never' for safety       #
-  #    Stops and deletes each container including its rootfs disk.      #
-  #    Run explicitly: --tags removeLXCs                                #
-  # ------------------------------------------------------------------ #
+  # 5) Remove containers — DESTRUCTIVE; tagged 'never' for safety
+  #    Stops and deletes each container including its rootfs disk.
+  #    Run explicitly: --tags removeLXCs
   - name: Stop LXC containers before removal
     community.proxmox.proxmox:
       node: "{{ pm_node }}"
@@ -256,6 +242,16 @@
     failed_when: >
       _lxc_delete_result.status not in [200, 500] or (_lxc_delete_result.status == 500 and
        'does not exist' not in (_lxc_delete_result.json.errors | default({}) | string))
+    loop: "{{ lxcs_merged }}"
+    loop_control:
+      label: "{{ item.hostname }}"
+    tags: [ never, removeLXCs ]
+
+  - name: Remove LXCs from inventory block
+    ansible.builtin.blockinfile:
+      path: "{{ playbook_dir }}/inventory/hosts.ini"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK: {{ item.name }}"
+      state: absent
     loop: "{{ lxcs_merged }}"
     loop_control:
       label: "{{ item.hostname }}"

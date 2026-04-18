@@ -1,5 +1,4 @@
 # group_vars/all/lxcs.yml
-# ─────────────────────────────────────────────────────────────────────────────
 # LXC container definitions consumed by create-lxc-proxmox.yml.
 #
 # Each entry maps one-to-one with a container in [lxcs] inventory group.
@@ -33,7 +32,6 @@
 #   or via the shell: pveam download local debian-12-standard_12.7-1_amd64.tar.zst
 #   The default template is set in lxc_defaults inside the playbook.
 #
-# ─────────────────────────────────────────────────────────────────────────────
 
 lxcs:
 

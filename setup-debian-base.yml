@@ -48,12 +48,10 @@
 
   tasks:
 
-  # ------------------------------------------------------------------ #
   # 0a) Remove cdrom apt source if present
   #     The Debian netinst installer adds the install cdrom as an apt source.
   #     The ISO is ejected after install, so this source causes update failures.
   #     Removing it here ensures 'apt update' works cleanly on first run.
-  # ------------------------------------------------------------------ #
   - name: Remove cdrom apt source (left by Debian netinst installer)
     ansible.builtin.lineinfile:
       path: /etc/apt/sources.list
@@ -61,9 +59,7 @@
       state: absent
     tags: [ base, apt ]
 
-  # ------------------------------------------------------------------ #
   # 0b) Update APT cache and upgrade existing packages
-  # ------------------------------------------------------------------ #
   - name: Update APT package index
     ansible.builtin.apt:
       update_cache: true
@@ -76,28 +72,22 @@
     register: _apt_upgrade
     tags: [ base, apt, upgrade ]
 
-  # ------------------------------------------------------------------ #
   # 1) Install base packages
-  # ------------------------------------------------------------------ #
   - name: Install base tool set
     ansible.builtin.apt:
       name: "{{ debian_base_packages }}"
       state: present
     tags: [ base, packages ]
 
-  # ------------------------------------------------------------------ #
   # 2) Set vim as the default editor system-wide
-  # ------------------------------------------------------------------ #
   - name: Set vim as default editor (update-alternatives)
     community.general.alternatives:
       name: editor
       path: /usr/bin/vim.basic
     tags: [ base, config ]
 
-  # ------------------------------------------------------------------ #
   # 3) Ensure qemu-guest-agent is enabled and running
   #    Required for Proxmox to detect IP + issue clean shutdown signals
-  # ------------------------------------------------------------------ #
   - name: Ensure qemu-guest-agent is enabled and started
     ansible.builtin.service:
       name: qemu-guest-agent
@@ -105,9 +95,7 @@
       enabled: true
     tags: [ base, services, qemu ]
 
-  # ------------------------------------------------------------------ #
   # 4) Harden SSH: disable password authentication (key-only)
-  # ------------------------------------------------------------------ #
   - name: Disable SSH password authentication
     ansible.builtin.lineinfile:
       path: /etc/ssh/sshd_config
@@ -135,9 +123,7 @@
     notify: Restart sshd
     tags: [ base, ssh, security ]
 
-  # ------------------------------------------------------------------ #
   # 5) Confirm sudoers entry for ansible user (idempotent)
-  # ------------------------------------------------------------------ #
   - name: Ensure ansible user sudoers file is correct
     ansible.builtin.copy:
       content: "{{ _ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
@@ -148,12 +134,10 @@
       validate: "/usr/sbin/visudo -cf %s"
     tags: [ base, sudo ]
 
-  # ------------------------------------------------------------------ #
   # 6) End-user account (optional)
   #    Set vm_enduser_name in preseed_vars.yml to enable.
   #    This creates the interactive login account for day-to-day VM use.
   #    The 'ansible' user is automation-only and is never used for logins.
-  # ------------------------------------------------------------------ #
   - name: Create end-user account
     ansible.builtin.user:
       name: "{{ vm_enduser_name }}"
@@ -174,9 +158,7 @@
       vm_enduser_name | default('') | length > 0 and vm_enduser_ssh_pub_key_file | default('') | length > 0
     tags: [ base, users ]
 
-  # ------------------------------------------------------------------ #
   # 7) Summary
-  # ------------------------------------------------------------------ #
   - name: Print base setup summary
     ansible.builtin.debug:
       msg:

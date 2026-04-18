@@ -16,10 +16,8 @@
 #
 # Credit: Thomas Mozdren
 
-# -----------------------------------------------------------------------
 # Source Debian ISO (must already exist on the Proxmox node)
 # Run: ansible-playbook fetch-iso.yml first to download it.
-# -----------------------------------------------------------------------
 preseed_iso_src_file: "debian-13.1.0-amd64-netinst.iso"
 preseed_iso_url: "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/{{ preseed_iso_src_file }}"
 
@@ -29,50 +27,38 @@ preseed_iso_dest_file: "debian-13-amd64-preseed.iso"
 # ISO storage location on the Proxmox node
 preseed_iso_dir: "/var/lib/vz/template/iso"
 
-# -----------------------------------------------------------------------
 # Debian suite / mirror
-# -----------------------------------------------------------------------
 preseed_debian_suite: "trixie"
 preseed_mirror_host: "deb.debian.org"
 preseed_mirror_proxy: ""
 
-# -----------------------------------------------------------------------
 # Locale / keyboard / timezone
-# -----------------------------------------------------------------------
 preseed_locale: "en_US.UTF-8"
 preseed_keymap: "us"
 preseed_timezone: "UTC"
 
-# -----------------------------------------------------------------------
 # Hostname defaults
 #   build-debian-preseed-iso.yml resolves the hostname in this order:
 #     1. item.preseed_hostname in vms.yml  (if non-empty)
 #     2. item.name in vms.yml             (VM name used as hostname)
 #     3. preseed_hostname below           (fallback if no preseed VMs found)
-# -----------------------------------------------------------------------
 preseed_hostname: "debian-vm"
 preseed_domain: "lan"
 
-# -----------------------------------------------------------------------
 # Ansible user SSH key injection
 # This key is written to /home/ansible/.ssh/authorized_keys during install.
 # The ansible user will have NOPASSWD sudo and locked password (SSH key only).
-# -----------------------------------------------------------------------
 preseed_ssh_pub_key_file: "~/.ssh/id_rsa.pub"
 preseed_ssh_priv_key_file: "~/.ssh/id_rsa"
 preseed_ssh_pub_key: "{{ lookup('file', preseed_ssh_pub_key_file) }}"
 preseed_ansible_user: "ansible"
 
-# -----------------------------------------------------------------------
 # Extra packages to install during preseed (space-separated string).
 # Base packages (openssh-server, sudo, qemu-guest-agent, curl, wget, vim)
 # are always included. Add any extra ones here.
-# -----------------------------------------------------------------------
 preseed_extra_packages: ""
 
-# -----------------------------------------------------------------------
 # Base packages installed by setup-debian-base.yml after VM is up
-# -----------------------------------------------------------------------
 debian_base_packages:
 - htop
 - btop
@@ -87,11 +73,9 @@ debian_base_packages:
 - jq
 - qemu-guest-agent
 
-# -----------------------------------------------------------------------
 # Auto-install timeout settings
 # How long to wait for Debian to install and SSH to become available.
 # Debian netinst downloads packages over the internet - allow plenty of time.
-# -----------------------------------------------------------------------
 # Seconds to wait for the VM to start booting before checking SSH
 preseed_boot_wait_seconds: 30
 # Max seconds to wait for SSH to become available after boot
@@ -99,7 +83,6 @@ preseed_ssh_wait_timeout: 2400
 # Seconds between SSH availability checks
 preseed_ssh_wait_delay: 30
 
-# -----------------------------------------------------------------------
 # End-user account (created by setup-debian-base.yml)
 #
 # This is an interactive login account for actual VM use.
@@ -114,7 +97,6 @@ preseed_ssh_wait_delay: 30
 #     python3 -c "import crypt; print(crypt.crypt('yourpassword', crypt.mksalt(crypt.METHOD_SHA512)))"
 #   Then define in group_vars/all/main.yml (vault-encrypted):
 #     vm_enduser_password_hash: !vault | ...
-# -----------------------------------------------------------------------
 vm_enduser_name: "cartman"
 vm_enduser_groups: "sudo"
 vm_enduser_shell: "/bin/bash"

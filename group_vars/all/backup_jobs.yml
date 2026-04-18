@@ -1,0 +1,105 @@
+# group_vars/all/backup_jobs.yml
+# Proxmox backup job definitions consumed by pve-backup-jobs.yml.
+#
+# Each entry maps to one vzdump backup job in Proxmox (cluster → Backup).
+# Jobs are identified by a stable 'id' field — re-running pve-backup-jobs.yml
+# creates the job if missing, or updates it in-place if it already exists.
+#
+# Required per job:
+#   id        — stable identifier used as the Proxmox job ID (lowercase, hyphens OK)
+#   storage   — Proxmox storage pool to write backups to
+#   schedule  — Proxmox/systemd calendar notation (see examples below)
+#
+# Optional per job:
+#   node              — Proxmox node name to pin the job to.
+#                       Omit (or leave unset) for "-- All --" (job runs on any node).
+#   mode              — snapshot (default) | suspend | stop
+#   compress          — zstd (default) | gz | lzo | 0 (none)
+#   vmid              — comma-separated VMID list; omit to back up ALL guests
+#   prune-backups     — retention policy string (Proxmox native format)
+#   comment           — free-text label shown in the Proxmox UI job list
+#   enabled           — true (default) | false
+#   mailnotification  — always | failure   (requires mailto)
+#   mailto            — comma-separated email address(es) for notifications
+#   notes-template    — notes template string applied to each backup
+#
+# Schedule format (Proxmox uses systemd OnCalendar specs):
+#   "Tue,Fri 00:20"   tue and fri at 00:20
+#   "Sat 00:10"       saturday at 00:10
+#   "Mon 01:00"       monday at 01:00
+#   "daily"           shorthand for daily at 00:00
+#
+# prune-backups format:
+#   "keep-last=3"
+#   "keep-last=6"
+#   "keep-daily=7,keep-weekly=4,keep-monthly=1"
+#
+# LXC vmids for reference (lxcs.yml):
+#   105=prometheus  107=grafana  108=proxexport  110=optiping  115=wazuh
+# LXC backups are intentionally excluded for now — see commented block below.
+#
+
+backup_jobs:
+
+# VM backups — 5 jobs matching current Proxmox UI configuration.
+# Node is omitted on all → "-- All --" in UI (cluster-wide scheduling).
+# Storage: backups pool.
+
+- id: "backup-wow-dev"
+  storage: "backups"
+  schedule: "Tue,Fri 00:20"
+  mode: snapshot
+  compress: zstd
+  vmid: "104"
+  prune-backups: "keep-last=6"
+  comment: "backup wow dev server"
+  enabled: true
+
+- id: "backup-mc-server"
+  storage: "backups"
+  schedule: "Sat 00:10"
+  mode: snapshot
+  compress: zstd
+  vmid: "109,103"
+  prune-backups: "keep-last=3"
+  comment: "backup mc-server"
+  enabled: true
+
+- id: "backup-vm-101"
+  storage: "backups"
+  schedule: "Mon 01:00"
+  mode: snapshot
+  compress: zstd
+  vmid: "101"
+  prune-backups: "keep-last=3"
+  enabled: true
+
+- id: "backup-vm-102"
+  storage: "backups"
+  schedule: "Tue,Fri 02:30"
+  mode: snapshot
+  compress: zstd
+  vmid: "102"
+  prune-backups: "keep-last=6"
+  enabled: true
+
+- id: "backup-vm-111"
+  storage: "backups"
+  schedule: "Tue,Fri 09:00"
+  mode: snapshot
+  compress: zstd
+  vmid: "111"
+  prune-backups: "keep-last=3"
+  enabled: true
+
+# LXC backups — disabled for now; uncomment when ready.
+# vmids: 105=prometheus  107=grafana  108=proxexport  110=optiping  115=wazuh
+#- id: "backup-lxcs"
+#  storage: "backups"
+#  schedule: "Mon 03:00"
+#  mode: snapshot
+#  compress: zstd
+#  vmid: "105,107,108,110,115"
+#  prune-backups: "keep-last=3"
+#  comment: "LXC container backups"
+#  enabled: true

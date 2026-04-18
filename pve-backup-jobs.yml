@@ -1,0 +1,154 @@
+# pve-backup-jobs.yml
+# Manage Proxmox vzdump backup job schedules declaratively via the REST API.
+#
+# Overview
+#   Idempotent, API-first playbook for creating and updating cluster-level backup
+#   jobs in the Proxmox UI (Datacenter → Backup). No SSH to the node required.
+#   Jobs are identified by a stable 'id' field in backup_jobs.yml — safe to re-run.
+#
+# What this playbook does
+#   createUpdateJobs  — for each job in backup_jobs.yml:
+#                         GET by id → if 404: POST (create); if 200: PUT (update)
+#   removeJobs        — DELETE each job by id (tagged 'never' — must be explicit)
+#
+# Prerequisites
+#   1. Proxmox API token with Sys.Modify or Datastore.Allocate privileges on the node.
+#   2. backup_jobs.yml defines the 'backup_jobs' list (group_vars/all/backup_jobs.yml).
+#
+# Job fields (see backup_jobs.yml for full documentation)
+#   Required: id, storage, schedule
+#   Optional: node (omit for "-- All --"), mode, compress, vmid, prune-backups,
+#             comment, enabled, mailnotification, mailto, notes-template
+#
+# Task tags
+#   createUpdateJobs  — upsert all jobs defined in backup_jobs.yml (default)
+#   removeJobs        — delete all jobs by id (DESTRUCTIVE — tagged 'never')
+#
+# Usage
+#   ansible-playbook pve-backup-jobs.yml --tags createUpdateJobs
+#   ansible-playbook pve-backup-jobs.yml --limit '' --tags removeJobs   # DESTRUCTIVE
+#   ansible-playbook pve-backup-jobs.yml                                 # same as createUpdateJobs
+#
+# Credit: Thomas Mozdren
+---
+- name: Manage Proxmox backup jobs via API
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+
+  vars_files:
+  - group_vars/all/backup_jobs.yml
+
+  vars:
+    pm_api_host: "{{ lookup('env', 'PM_API_HOST')     | default('192.168.0.222', true) }}"
+    pm_api_port: 8006
+    pm_api_user: "{{ lookup('env', 'PM_API_USER')     | default('root@pam', true) }}"
+    pm_api_token_id: "{{ lookup('env', 'PM_API_TOKEN_ID') | default('ansible-automation', true) }}"
+    pm_api_validate_certs: false
+
+    _api_base: "https://{{ pm_api_host }}:{{ pm_api_port }}/api2/json"
+    _auth_header:
+      Authorization: "PVEAPIToken={{ pm_api_user }}!{{ pm_api_token_id }}={{ pm_api_token_secret }}"
+
+  tasks:
+
+  # 1) Probe each job by its stable id (200 = exists, 404 = new)
+  - name: Check whether each backup job already exists
+    ansible.builtin.uri:
+      url: "{{ _api_base }}/cluster/backup/{{ item.id }}"
+      method: GET
+      headers: "{{ _auth_header }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [ 200, 404 ]
+    loop: "{{ backup_jobs }}"
+    loop_control:
+      label: "{{ item.id }}"
+    register: _job_probe
+    tags: [ createUpdateJobs ]
+
+  # 2) Create jobs that do not yet exist (probe returned 404)
+  - name: Create new backup jobs
+    vars:
+      _base:
+        id: "{{ item.0.id }}"
+        storage: "{{ item.0.storage }}"
+        schedule: "{{ item.0.schedule }}"
+        mode: "{{ item.0.mode | default('snapshot') }}"
+        compress: "{{ item.0.compress | default('zstd') }}"
+        enabled: "{{ 1 if (item.0.enabled | default(true) | bool) else 0 }}"
+      _optional: >-
+        {{
+          {}
+          | combine({'node':             item.0.node}                    if item.0.node             is defined else {})
+          | combine({'vmid':             item.0.vmid}                    if item.0.vmid             is defined else {})
+          | combine({'prune-backups':    item.0['prune-backups']}        if 'prune-backups'    in item.0 else {})
+          | combine({'comment':          item.0.comment}                 if item.0.comment          is defined else {})
+          | combine({'mailnotification': item.0.mailnotification}        if item.0.mailnotification is defined else {})
+          | combine({'mailto':           item.0.mailto}                  if item.0.mailto           is defined else {})
+          | combine({'notes-template':   item.0['notes-template']}       if 'notes-template'   in item.0 else {})
+        }}
+      _body: "{{ _base | combine(_optional) }}"
+    ansible.builtin.uri:
+      url: "{{ _api_base }}/cluster/backup"
+      method: POST
+      headers: "{{ _auth_header }}"
+      body_format: form-urlencoded
+      body: "{{ _body }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [ 200 ]
+    when: item.1.status == 404
+    loop: "{{ backup_jobs | zip(_job_probe.results) | list }}"
+    loop_control:
+      label: "{{ item.0.id }}"
+    tags: [ createUpdateJobs ]
+
+  # 3) Update jobs that already exist (probe returned 200)
+  - name: Update existing backup jobs
+    vars:
+      _base:
+        storage: "{{ item.0.storage }}"
+        schedule: "{{ item.0.schedule }}"
+        mode: "{{ item.0.mode | default('snapshot') }}"
+        compress: "{{ item.0.compress | default('zstd') }}"
+        enabled: "{{ 1 if (item.0.enabled | default(true) | bool) else 0 }}"
+      _optional: >-
+        {{
+          {}
+          | combine({'node':             item.0.node}                    if item.0.node             is defined else {})
+          | combine({'vmid':             item.0.vmid}                    if item.0.vmid             is defined else {})
+          | combine({'prune-backups':    item.0['prune-backups']}        if 'prune-backups'    in item.0 else {})
+          | combine({'comment':          item.0.comment}                 if item.0.comment          is defined else {})
+          | combine({'mailnotification': item.0.mailnotification}        if item.0.mailnotification is defined else {})
+          | combine({'mailto':           item.0.mailto}                  if item.0.mailto           is defined else {})
+          | combine({'notes-template':   item.0['notes-template']}       if 'notes-template'   in item.0 else {})
+        }}
+      _body: "{{ _base | combine(_optional) }}"
+    ansible.builtin.uri:
+      url: "{{ _api_base }}/cluster/backup/{{ item.0.id }}"
+      method: PUT
+      headers: "{{ _auth_header }}"
+      body_format: form-urlencoded
+      body: "{{ _body }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [ 200 ]
+    when: item.1.status == 200
+    loop: "{{ backup_jobs | zip(_job_probe.results) | list }}"
+    loop_control:
+      label: "{{ item.0.id }}"
+    tags: [ createUpdateJobs ]
+
+  # 4) Remove jobs — DESTRUCTIVE; tagged 'never' for safety
+  #    Deletes each job by id. Does NOT delete existing backup files.
+  #    Run explicitly: --tags removeJobs
+  - name: Remove backup jobs
+    ansible.builtin.uri:
+      url: "{{ _api_base }}/cluster/backup/{{ item.id }}"
+      method: DELETE
+      headers: "{{ _auth_header }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+      status_code: [ 200, 404 ]
+    loop: "{{ backup_jobs }}"
+    loop_control:
+      label: "{{ item.id }}"
+    tags: [ never, removeJobs ]

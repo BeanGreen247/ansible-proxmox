@@ -169,9 +169,7 @@
             else 'REBOOTED' if reboot_needed
             else 'no reboot needed' }}
 
-  # ------------------------------------------------------------------ #
   # SUMMARY — per-host upgrade report
-  # ------------------------------------------------------------------ #
 
   - name: "[summary] Get root filesystem free space"
     ansible.builtin.shell:

@@ -130,9 +130,7 @@
       preseed_vms: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list }}"
     tags: [ always ]
 
-  # ------------------------------------------------------------------ #
   # Fast path: ip_address already defined in vms.yml - use it directly
-  # ------------------------------------------------------------------ #
   - name: Use static ip_address for VMs that have one defined
     ansible.builtin.set_fact:
       discovered_ips: >-
@@ -146,7 +144,6 @@
       label: "{{ item.name }}"
     tags: [ preseed, wait ]
 
-  # ------------------------------------------------------------------ #
   # Auto-discovery path for VMs without a static ip_address.
   #
   # The preseed is configured with 'exit/halt=true' so the VM powers off
@@ -155,7 +152,6 @@
   #   2) Eject the ISO and fix boot order while the VM is safely off
   #   3) Power it on so it boots from disk (no reinstall loop)
   #   4) Poll the guest agent for the IP of the running installed system
-  # ------------------------------------------------------------------ #
   - name: "Wait for install to complete - VM halts when done (up to {{ (preseed_ssh_wait_timeout | int // 60) }} min)"
     ansible.builtin.uri:
       url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.vmid }}/status/current"
@@ -294,11 +290,9 @@
     when: item.name in (discovered_ips | default({}))
     tags: [ preseed, wait ]
 
-  # ------------------------------------------------------------------ #
   # Wait for SSH on each discovered IP
   # (For guest-agent-discovered IPs the VM is already up, but SSH
   #  may need a few extra seconds after the agent starts)
-  # ------------------------------------------------------------------ #
   - name: Wait for SSH to respond on each VM
     ansible.builtin.wait_for:
       host: "{{ discovered_ips[item.name] }}"

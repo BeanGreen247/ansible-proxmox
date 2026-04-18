@@ -1,34 +1,33 @@
-# Fetch ISOs for Proxmox VMs (Fully Automated * API-First)
+# Fetch ISOs and CT Templates for Proxmox (Fully Automated * SSH)
 #
 # Overview
-#   End-to-end, idempotent VM provisioning on Proxmox using Ansible + Proxmox API only.
-#   No UI clicks. Safe to re-run. Great for CI/CD, cron, or one-liners.
+#   Idempotent fetcher for boot ISOs and LXC container templates on Proxmox nodes.
+#   Safe to re-run. No UI clicks required.
 #
 # What this playbook does
-#   * PLAY 1 (remote over SSH): Ensure a boot ISO exists on the target Proxmox node
+#   * PLAY 1 — fetchISO: Ensure a boot ISO exists on the target Proxmox node
 #       - Creates the ISO directory ({{ iso_dir }})
 #       - Downloads the ISO if missing from {{ iso_url }} to {{ iso_dir }}/{{ iso_file }}
-#       - NOTE: Currently a single ISO source; VMs consume it via {{ item.iso_storage }}:{{ item.iso_path }}
+#       - ISO is consumed by VMs via {{ item.iso_storage }}:{{ item.iso_path }}
 #
-# Key features
-#   * Clean idempotency (safe to re-apply without duplicate resources)
+#   * PLAY 2 — fetchTemplate: Download LXC CT templates via pveam
+#       - Updates the pveam repository index
+#       - Downloads each template in ct_templates if not already cached
+#       - Templates are defined in vars below; override per-run with --extra-vars
+#       - Unlocks the LXC pipeline: no manual UI step needed before create-lxc-proxmox.yml
 #
-# Inputs & variables
-#   ISO handling (PLAY):
-#     iso_dir, iso_url, iso_file
+# Task tags
+#   fetchISO      — download boot ISO (PLAY 1 tasks are tagged 'always' for back-compat)
+#   fetchTemplate — update pveam index + download missing CT templates (PLAY 2)
 #
-# Task tags (use -t/--tags to target specific steps)
-#   checkIso    => Ensure ISO presence
+# Quick start — ISO
+#   ansible-playbook -i inventory/hosts.ini fetch-iso.yml \
+#     --extra-vars '{"iso_url":"https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.1.0-amd64-netinst.iso","iso_file":"debian-13.1.0-amd64-netinst.iso"}'
 #
-# Quick start
-#   1) Create a Proxmox API token (e.g., root@pam + token ID/secret) with VM privileges.
-#   2) Put your Proxmox node under the [proxmox-bms] group in inventory/hosts.ini.
-#   3) Run:
-#        ansible-playbook -i inventory/hosts.ini fetch-iso.yml --extra-vars '{"iso_url":"direct_url_to_iso_file","iso_file":"the_iso_file_itself.iso"}'
-#   N) Example:
-#        ansible-playbook -i inventory/hosts.ini fetch-iso.yml --extra-vars
-#           '{"iso_url":"https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.1.0-amd64-netinst.iso",
-#             "iso_file":"debian-13.1.0-amd64-netinst.iso"}'
+# Quick start — CT templates
+#   ansible-playbook -i inventory/hosts.ini fetch-iso.yml --tags fetchTemplate
+#   ansible-playbook -i inventory/hosts.ini fetch-iso.yml --tags fetchTemplate \
+#     --extra-vars '{"ct_templates":[{"name":"debian-13-standard_13.1-2_amd64.tar.zst","storage":"local"}]}'
 #
 # Credit: Thomas Mozdren
 ---
@@ -67,3 +66,68 @@
       - "URL: {{ result.url | default(iso_url) }}"
       - "Size (bytes): {{ result.size | default('unknown') }}"
     tags: [ always ]
+
+# PLAY 2 — Download LXC CT templates via pveam
+- name: Fetch CT templates via pveam
+  hosts: proxmox-bms
+  become: true
+  gather_facts: false
+  ignore_unreachable: true
+  vars:
+    # Default storage to download templates into.
+    # Override per-template with a 'storage' key in ct_templates, or override
+    # this var globally with --extra-vars ct_template_storage=<pool>.
+    ct_template_storage: "local"
+
+    # List of CT templates to ensure are cached on the Proxmox node.
+    # These match the templates referenced in create-lxc-proxmox.yml.
+    # Add/remove entries as needed; the play is idempotent (skip if cached).
+    #
+    # Fields:
+    #   name    (required) — exact filename as shown by: pveam available --section system
+    #   storage (optional) — storage pool; defaults to ct_template_storage above
+    ct_templates:
+    - name: "debian-13-standard_13.1-2_amd64.tar.zst"
+      storage: "local"
+    - name: "ubuntu-25.04-standard_25.04-1.1_amd64.tar.zst"
+      storage: "local"
+
+  tasks:
+
+  # 1) Refresh the list of downloadable templates from the Proxmox CDN
+  - name: Update pveam repository index
+    ansible.builtin.command:
+      cmd: pveam update
+    changed_when: false
+    tags: [ fetchTemplate ]
+
+  # 2) Check which templates are already cached (per storage)
+  - name: List currently cached templates on target storage
+    ansible.builtin.command:
+      cmd: "pveam list {{ item.storage | default(ct_template_storage) }}"
+    loop: "{{ ct_templates }}"
+    loop_control:
+      label: "{{ item.name }}"
+    register: _pveam_list
+    changed_when: false
+    tags: [ fetchTemplate ]
+
+  # 3) Download only templates that are not already cached
+  - name: Download missing CT templates
+    ansible.builtin.command:
+      cmd: "pveam download {{ item.0.storage | default(ct_template_storage) }} {{ item.0.name }}"
+    when: item.0.name not in item.1.stdout
+    loop: "{{ ct_templates | zip(_pveam_list.results) | list }}"
+    loop_control:
+      label: "{{ item.0.name }}"
+    register: _ct_download
+    tags: [ fetchTemplate ]
+
+  - name: Print CT template download results
+    ansible.builtin.debug:
+      msg: >-
+        {{ item.item.0.name }}: {{ 'downloaded' if not item.skipped | default(false) else 'already cached — skipped' }}
+    loop: "{{ _ct_download.results }}"
+    loop_control:
+      label: "{{ item.item.0.name }}"
+    tags: [ fetchTemplate ]

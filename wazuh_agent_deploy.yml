@@ -58,9 +58,7 @@
 
   tasks:
 
-  # ------------------------------------------------------------------ #
-  # Inventory — show the IP parsed from hosts.ini                    #
-  # ------------------------------------------------------------------ #
+  # Inventory — show the IP parsed from hosts.ini
 
   - name: "[wazuh] Show inventory host details"
     ansible.builtin.debug:
@@ -81,9 +79,7 @@
     ansible.builtin.meta: end_host
     when: inventory_hostname == 'lxc-wazuh'
 
-  # ------------------------------------------------------------------ #
-  # Repository setup                                                     #
-  # ------------------------------------------------------------------ #
+  # Repository setup
 
   - name: "[wazuh] Install prerequisite packages"
     ansible.builtin.apt:
@@ -107,9 +103,7 @@
       state: present
       update_cache: true
 
-  # ------------------------------------------------------------------ #
-  # Firewall — open outbound ports to Wazuh manager if UFW is active   #
-  # ------------------------------------------------------------------ #
+  # Firewall — open outbound ports to Wazuh manager if UFW is active
 
   - name: "[ufw] Check if UFW is active"
     ansible.builtin.command:
@@ -136,9 +130,7 @@
       proto: tcp
     when: "'Status: active' in ufw_status.stdout"
 
-  # ------------------------------------------------------------------ #
-  # Install                                                              #
-  # ------------------------------------------------------------------ #
+  # Install
 
   - name: "[wazuh] Check if wazuh-agent is already installed"
     ansible.builtin.command:
@@ -156,9 +148,7 @@
       WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
     when: "'install ok installed' not in wazuh_pkg_status.stdout"
 
-  # ------------------------------------------------------------------ #
-  # Configure — ensure manager IP is correct on every run               #
-  # ------------------------------------------------------------------ #
+  # Configure — ensure manager IP is correct on every run
 
   - name: "[wazuh] Ensure manager address in ossec.conf"
     ansible.builtin.lineinfile:
@@ -168,9 +158,7 @@
       backrefs: true
     notify: Restart wazuh-agent
 
-  # ------------------------------------------------------------------ #
-  # Service                                                              #
-  # ------------------------------------------------------------------ #
+  # Service
 
   - name: "[wazuh] Reload systemd daemon"
     ansible.builtin.systemd:
@@ -182,20 +170,16 @@
       enabled: true
       state: started
 
-  # ------------------------------------------------------------------ #
-  # Pin package version to prevent accidental upgrades                  #
-  # ------------------------------------------------------------------ #
+  # Pin package version to prevent accidental upgrades
 
   - name: "[wazuh] Hold wazuh-agent package (prevent auto-upgrade)"
     ansible.builtin.dpkg_selections:
       name: wazuh-agent
       selection: hold
 
-  # ------------------------------------------------------------------ #
-  # Test / Verify — run with:                                           #
-  #   ansible-playbook wazuh_agent_deploy.yml --tags test               #
-  # lxc-wazuh is always excluded — it runs the manager, not the agent. #
-  # ------------------------------------------------------------------ #
+  # Test / Verify — run with:
+  #   ansible-playbook wazuh_agent_deploy.yml --tags test
+  # lxc-wazuh is always excluded — it runs the manager, not the agent.
 
   - name: "[wazuh][test] Run agent checks (skipped on lxc-wazuh)"
     when: inventory_hostname != 'lxc-wazuh'

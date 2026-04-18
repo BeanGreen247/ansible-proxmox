@@ -61,9 +61,7 @@
 # Credit: Thomas Mozdren
 ---
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PLAY 1: Debian / Ubuntu hardening (apt-based hosts)
-# ─────────────────────────────────────────────────────────────────────────────
 - name: CIS Level 1 hardening — Debian / Ubuntu hosts
   hosts: lxcs:vms
   gather_facts: true
@@ -141,7 +139,7 @@
     # ── Warning banner ────────────────────────────────────────────────────
     cis_login_banner: |
       ########################################################################
-      # Authorized access only.  All activity may be monitored and reported. #
+      # Authorized access only.  All activity may be monitored and reported.
       ########################################################################
 
     # ── Filesystem module blacklist (VMs only; no effect in LXC) ─────────
@@ -985,9 +983,7 @@
       state: restarted
     failed_when: false
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PLAY 2: Alpine-specific hardening (apk-based hosts)
-# ─────────────────────────────────────────────────────────────────────────────
 - name: CIS hardening subset — Alpine Linux hosts
   hosts: lxcs:vms
   gather_facts: true
@@ -1000,7 +996,7 @@
     cis_allow_tcp_fwd: false
     cis_login_banner: |
       ########################################################################
-      # Authorized access only.  All activity may be monitored and reported. #
+      # Authorized access only.  All activity may be monitored and reported.
       ########################################################################
 
   pre_tasks:

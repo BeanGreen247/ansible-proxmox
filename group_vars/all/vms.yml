@@ -37,12 +37,10 @@
 
 vms:
 
-# -----------------------------------------------------------------------
 # MINIMUM — Manual install VM (Debian / Ubuntu)
 #   Creates the VM shell in Proxmox with the ISO mounted.
 #   You boot it, install the OS manually, and manage it yourself.
 #   No preseed pipeline is involved.
-# -----------------------------------------------------------------------
 #- name: "my-manual-vm"
 #  vmid: 601
 #  memory: 2048
@@ -56,11 +54,9 @@ vms:
 #  iso_path: "iso/"
 #  iso_file: "debian-13.1.0-amd64-netinst.iso"
 
-# -----------------------------------------------------------------------
 # RHEL / Rocky Linux / AlmaLinux — Manual install
 #   ostype: l26 (generic Linux)
 #   DNF-based — managed by update_upgrade.yml after install
-# -----------------------------------------------------------------------
 #- name: "my-rhel-vm"
 #  vmid: 610
 #  memory: 2048
@@ -74,11 +70,9 @@ vms:
 #  iso_path: "iso/"
 #  iso_file: "Rocky-9.5-x86_64-minimal.iso"
 
-# -----------------------------------------------------------------------
 # Fedora Linux — Manual install
 #   ostype: l26 (generic Linux)
 #   DNF-based — managed by update_upgrade.yml after install
-# -----------------------------------------------------------------------
 #- name: "my-fedora-vm"
 #  vmid: 611
 #  memory: 2048
@@ -92,11 +86,9 @@ vms:
 #  iso_path: "iso/"
 #  iso_file: "Fedora-Server-dvd-x86_64-42.iso"
 
-# -----------------------------------------------------------------------
 # Arch Linux — Manual install
 #   ostype: l26 (generic Linux)
 #   Pacman-based — managed by update_upgrade.yml after install
-# -----------------------------------------------------------------------
 #- name: "my-arch-vm"
 #  vmid: 612
 #  memory: 2048
@@ -110,13 +102,11 @@ vms:
 #  iso_path: "iso/"
 #  iso_file: "archlinux-2025.04.01-x86_64.iso"
 
-# -----------------------------------------------------------------------
 # Windows 10 / 11 — Manual install
 #   ostype: win10 / win11  (enables Proxmox Windows-specific defaults)
 #   Requires VirtIO driver ISO mounted on ide3 during install.
 #   agent: 1 requires the VirtIO guest agent installed inside Windows.
 #   NOT managed by update_upgrade.yml (no supported package manager).
-# -----------------------------------------------------------------------
 #- name: "my-windows-vm"
 #  vmid: 620
 #  memory: 8192
@@ -133,13 +123,11 @@ vms:
 #  # Download from: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/
 #  # ide3: "local:iso/virtio-win.iso,media=cdrom"
 
-# -----------------------------------------------------------------------
 # MINIMUM — Automated preseed install VM
 #   Fully unattended Debian install via the preseed pipeline.
 #   Requires: build-debian-preseed-iso.yml run first.
 #   Boot order must start with ide2 (the preseed ISO).
 #   preseed_hostname defaults to the VM name if omitted or left empty.
-# -----------------------------------------------------------------------
 #- name: "my-auto-vm"
 #  vmid: 602
 #  boot: "order=ide2;scsi0;net0"
@@ -159,11 +147,9 @@ vms:
 #  # preseed_ip: "192.168.0.x"         # omit for DHCP
 #  # preseed_gateway: "192.168.0.1"    # required if preseed_ip is set
 
-# -----------------------------------------------------------------------
 # Preseed auto-install example (active)
 # Uses the ISO built by build-debian-preseed-iso.yml
 # Managed by: auto-install-debian.yml + setup-debian-base.yml
-# -----------------------------------------------------------------------
 - name: "ansible-debian-01"
   vmid: 500
   # Boot from ISO first, then disk (preseed auto-install)
@@ -181,7 +167,7 @@ vms:
   iso_path: "iso/"
   # Reference the preseed ISO built by build-debian-preseed-iso.yml
   iso_file: "debian-13-amd64-preseed.iso"
-  # --- Preseed install flags ---
+  # Preseed install flags
   # Set to true to include this VM in auto-install-debian.yml
   preseed_install: true
   # ip_address is OPTIONAL - if omitted, the IP is auto-discovered via

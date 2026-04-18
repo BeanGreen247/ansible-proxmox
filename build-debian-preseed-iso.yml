@@ -58,9 +58,7 @@
 
   tasks:
 
-  # ------------------------------------------------------------------ #
   # 0) Install required tools on the Proxmox node
-  # ------------------------------------------------------------------ #
   - name: Install ISO remaster tools (xorriso, binutils)
     ansible.builtin.apt:
       name:
@@ -70,9 +68,7 @@
       update_cache: true
     tags: [ preseed, build, tools ]
 
-  # ------------------------------------------------------------------ #
   # 1) Verify source ISO is present
-  # ------------------------------------------------------------------ #
   - name: Check source ISO exists
     ansible.builtin.stat:
       path: "{{ _src_iso }}"
@@ -86,9 +82,7 @@
     when: not _src_iso_stat.stat.exists
     tags: [ preseed, build ]
 
-  # ------------------------------------------------------------------ #
   # 3) Prepare clean working directory
-  # ------------------------------------------------------------------ #
   - name: Remove stale working directory (idempotency)
     ansible.builtin.file:
       path: "{{ _work_dir }}"
@@ -102,9 +96,7 @@
       mode: "0755"
     tags: [ preseed, build ]
 
-  # ------------------------------------------------------------------ #
   # 4) Extract ISO content
-  # ------------------------------------------------------------------ #
   - name: Extract ISO content into working directory
     ansible.builtin.command:
       cmd: >
@@ -118,13 +110,11 @@
     changed_when: true
     tags: [ preseed, build, extract ]
 
-  # ------------------------------------------------------------------ #
   # 5a) Resolve preseed hostname from vms.yml
   #     Priority: item.preseed_hostname (if non-empty) -> item.name -> global default
   #     Note: a single ISO is built for the first preseed-flagged VM.
   #     If multiple VMs share the same ISO they will all get this hostname
   #     at install time; rename post-install with setup-debian-base.yml.
-  # ------------------------------------------------------------------ #
   - name: Resolve preseed hostname from vms.yml (falls back to VM name if preseed_hostname is empty)
     vars:
       _preseed_vm: "{{ vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list | first | default({}) }}"
@@ -138,12 +128,10 @@
     when: vms | selectattr('preseed_install', 'defined') | selectattr('preseed_install') | list | length > 0
     tags: [ preseed, build, template, inject ]
 
-  # ------------------------------------------------------------------ #
   # 5b) Render and inject preseed.cfg directly into the extracted ISO root
   #     template reads the .j2 from the control node, renders with Ansible
   #     variables (including preseed_hostname resolved above), and writes
   #     the result to the remote work directory.
-  # ------------------------------------------------------------------ #
   - name: Render and inject preseed.cfg into extracted ISO root
     ansible.builtin.template:
       src: "{{ playbook_dir }}/preseed/debian-preseed.cfg.j2"
@@ -151,11 +139,9 @@
       mode: "0644"
     tags: [ preseed, build, template, inject ]
 
-  # ------------------------------------------------------------------ #
   # 6) Patch GRUB config (EFI boot path)
   #    Adds auto-install parameters to every 'linux' line in grub.cfg
   #    Sets timeout=0 so the installer launches immediately
-  # ------------------------------------------------------------------ #
   - name: Check if GRUB config exists (EFI boot)
     ansible.builtin.stat:
       path: "{{ _work_dir }}/boot/grub/grub.cfg"
@@ -186,12 +172,10 @@
     when: _grub_cfg.stat.exists
     tags: [ preseed, build, grub ]
 
-  # ------------------------------------------------------------------ #
   # 7) Patch ISOLINUX config (BIOS boot path)
   #    Typical Debian 12 layout:
   #      isolinux/isolinux.cfg  -> general config (timeout)
   #      isolinux/txt.cfg       -> text install menu entries (append line)
-  # ------------------------------------------------------------------ #
   - name: Check if ISOLINUX txt.cfg exists (BIOS boot)
     ansible.builtin.stat:
       path: "{{ _work_dir }}/isolinux/txt.cfg"
@@ -250,28 +234,22 @@
     when: _isolinux_txt.stat.exists
     tags: [ preseed, build, isolinux ]
 
-  # ------------------------------------------------------------------ #
   # 8) Extract MBR hybrid boot record from the original ISO
   #    (first 432 bytes contain the GRUB MBR hybrid boot record)
-  # ------------------------------------------------------------------ #
   - name: Extract MBR boot record from original ISO
     ansible.builtin.command:
       cmd: dd if="{{ _src_iso }}" bs=1 count=432 of="{{ _work_dir }}/isohdpfx.bin"
     changed_when: true
     tags: [ preseed, build, repack ]
 
-  # ------------------------------------------------------------------ #
   # 9) Detect EFI image presence for hybrid ISO repack
-  # ------------------------------------------------------------------ #
   - name: Check if EFI image exists for hybrid ISO
     ansible.builtin.stat:
       path: "{{ _work_dir }}/boot/grub/efi.img"
     register: _efi_img
     tags: [ preseed, build, repack ]
 
-  # ------------------------------------------------------------------ #
   # 10a) Repack - BIOS + EFI hybrid ISO (most Debian 12 netinst ISOs)
-  # ------------------------------------------------------------------ #
   - name: Repack ISO with BIOS + EFI boot support
     ansible.builtin.command:
       cmd: >
@@ -280,9 +258,7 @@
     changed_when: true
     tags: [ preseed, build, repack ]
 
-  # ------------------------------------------------------------------ #
   # 10b) Repack - BIOS-only fallback (no EFI image found)
-  # ------------------------------------------------------------------ #
   - name: Repack ISO with BIOS-only boot (EFI image not found)
     ansible.builtin.command:
       cmd: >
@@ -291,9 +267,7 @@
     changed_when: true
     tags: [ preseed, build, repack ]
 
-  # ------------------------------------------------------------------ #
   # 11) Verify the output ISO was created
-  # ------------------------------------------------------------------ #
   - name: Verify output ISO exists
     ansible.builtin.stat:
       path: "{{ _dest_iso }}"
@@ -306,18 +280,14 @@
     when: not ansible_check_mode and not _dest_iso_stat.stat.exists
     tags: [ preseed, build, verify ]
 
-  # ------------------------------------------------------------------ #
   # 12) Cleanup working directory
-  # ------------------------------------------------------------------ #
   - name: Clean up working directory
     ansible.builtin.file:
       path: "{{ _work_dir }}"
       state: absent
     tags: [ preseed, build, cleanup ]
 
-  # ------------------------------------------------------------------ #
   # 13) Summary
-  # ------------------------------------------------------------------ #
   - name: Print output ISO info
     ansible.builtin.debug:
       msg:

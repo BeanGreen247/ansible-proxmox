@@ -288,7 +288,6 @@
       - "All guests     : {{ vm_sorted | length }} | All MAX sum     : {{ all_max_sum }} Gi"
       - "Headroom (all guests at MAX)  : {{ headroom_all }} Gi  |  Status: {{ status_all }}"
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PLAY 2: Fleet health check — SSH reachability + critical service states
 #
 #   Connects to every host in [lxcs] and [vms] groups, gathers service facts,
@@ -297,7 +296,6 @@
 #
 #   Run stand-alone (skips the Proxmox API play above):
 #     ansible-playbook pve_vm_status.yml --tags health
-# ─────────────────────────────────────────────────────────────────────────────
 - name: Fleet health check — per-host SSH and service status
   hosts: lxcs:vms
   gather_facts: true
@@ -382,9 +380,7 @@
       msg: "{{ inventory_hostname }} ({{ ansible_host }}) | SSH REACHABLE | Alpine — service_facts skipped"
     when: ansible_pkg_mgr is defined and ansible_pkg_mgr == 'apk'
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PLAY 3: Consolidated fleet summary (runs on control node from hostvars)
-# ─────────────────────────────────────────────────────────────────────────────
 - name: Fleet health — consolidated summary
   hosts: localhost
   gather_facts: false
