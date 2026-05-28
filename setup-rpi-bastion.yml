@@ -1,0 +1,529 @@
+# setup-rpi-bastion.yml
+# Configure a Raspberry Pi as a minimal, hardened SSH bastion / jump host,
+# Tailscale subnet router, and Cockpit browser terminal.
+#
+# Overview
+#   Turns a fresh Raspberry Pi OS Lite (Debian-based) into the single external
+#   access point for your entire Proxmox platform.  Nothing else on your LAN
+#   needs to be exposed or modified.
+#
+#   Architecture
+#
+#     [Laptop / phone — anywhere]
+#            │
+#            ├─ SSH ProxyJump ──────────────────────────────────────────────┐
+#            │    ssh -J bastion@rpi <target>                               │
+#            │                                                              ▼
+#            │                                              [RPi bastion — only exposed host]
+#            │                                                              │
+#            │                                              ┌───────────────┼──────────────────┐
+#            │                                              ▼               ▼                  ▼
+#            │                                         [lxc-grafana]  [vm-dev]  [any 192.168.0.x]
+#            │
+#            └─ Tailscale (WireGuard) ──────────────────── RPi subnet router
+#                 laptop joins same Tailnet                advertises 192.168.0.0/24
+#                 → reach any 192.168.0.x directly         → Grafana, Proxmox UI, etc.
+#                 → zero bandwidth on LAN traffic
+#
+#     Cockpit (browser): https://rpi-bastion:9090
+#       → system health, terminal in browser — no VPN/port-forward needed on LAN
+#       → through Tailscale when off-network
+#
+# What this playbook configures
+#   • System:    hostname, timezone, unattended-upgrades
+#   • SSH:       hardened sshd_config, key-only, AllowTcpForwarding YES (ProxyJump)
+#   • UFW:       default-deny; allow SSH + Tailscale + Cockpit
+#   • Fail2ban:  brute-force lockout on the exposed SSH port
+#   • Jump acct: minimal no-shell user for ProxyJump relay
+#   • Tailscale: installed, subnet route 192.168.0.0/24 advertised
+#                Uses WireGuard — extremely low bandwidth, encrypted
+#   • Cockpit:   browser-based terminal + system admin on port 9090
+#                Restricted to LAN + Tailscale — never open to internet
+#
+# Prerequisites
+#   • Fresh Raspberry Pi OS Lite (Bookworm recommended) with SSH enabled
+#   • RPi reachable from your Ansible controller (direct LAN or USB-ethernet)
+#   • Host added to [rpi-bastions] in inventory/hosts.ini
+#   • ansibleuser bootstrapped: ansible-playbook setup-ansibleuser.yml -u pi --limit rpi-bastions
+#   • Tailscale account at https://login.tailscale.com (free tier is sufficient)
+#   • Router port-forward: <external port> → RPi:{{ cis_bastion_ssh_port }} (SSH only)
+#
+# Variables
+#   cis_bastion_ssh_port    — sshd listen port (default: 22; use 2222+ for internet)
+#   bastion_jump_user       — ProxyJump account name (default: bastion)
+#   bastion_jump_pub_keys   — list of pub key files to authorize (default: [~/.ssh/id_rsa.pub])
+#   bastion_timezone        — system timezone (default: UTC)
+#   bastion_hostname        — RPi hostname (default: rpi-bastion)
+#   bastion_subnet_route    — LAN CIDR the RPi will advertise to Tailscale
+#                             (default: 192.168.0.0/24)
+#   bastion_tailscale_authkey — Tailscale auth key from https://login.tailscale.com/admin/settings/keys
+#                               Generate a reusable+ephemeral key, store in vault.
+#                               Leave unset to skip the tailscale up step (manual auth instead).
+#   bastion_cockpit_bind    — Cockpit listen address (default: 0.0.0.0; Cockpit port
+#                             is blocked by UFW except from LAN + Tailscale ranges)
+#
+# Usage
+#   ansible-playbook setup-rpi-bastion.yml                        # full setup
+#   ansible-playbook setup-rpi-bastion.yml --tags bastion_ssh     # SSH only
+#   ansible-playbook setup-rpi-bastion.yml --tags bastion_ts      # Tailscale only
+#   ansible-playbook setup-rpi-bastion.yml --tags bastion_cockpit # Cockpit only
+#   ansible-playbook setup-rpi-bastion.yml --tags bastion_ufw     # UFW only
+#
+# After this playbook
+#   1. Approve the subnet route in Tailscale admin console:
+#      https://login.tailscale.com/admin/machines → RPi → Edit route settings
+#   2. Enable IP forwarding approval in admin console (or pass --accept-routes on client)
+#   3. See docs/ssh-access.md for ~/.ssh/config examples.
+#
+# Re-running
+#   Fully idempotent.  tailscale up is skipped if already connected.
+#
+# Credit: Thomas Mozdren
+---
+- name: Configure RPi SSH bastion / jump host
+  hosts: rpi-bastions
+  gather_facts: true
+  become: true
+  ignore_unreachable: false
+
+  vars:
+    cis_bastion_ssh_port: 22 # change to e.g. 2222 for internet exposure
+    bastion_jump_user: "bastion"
+    bastion_jump_pub_keys:
+    - "~/.ssh/id_rsa.pub" # add laptop/external device keys here
+    bastion_timezone: "UTC"
+    bastion_hostname: "rpi-bastion"
+
+    # ── Tailscale subnet router ───────────────────────────────────────────
+    # The RPi will advertise this CIDR to your Tailnet so every device in
+    # your Tailnet can reach internal hosts without any changes on those hosts.
+    bastion_subnet_route: "192.168.0.0/24"
+    # Auth key from https://login.tailscale.com/admin/settings/keys
+    # Generate a reusable key, encrypt with ansible-vault, store in host_vars.
+    # If not set, tailscale up is skipped and you authenticate manually:
+    #   sudo tailscale up --advertise-routes=192.168.0.0/24
+    bastion_tailscale_authkey: "" # override in host_vars/rpi-bastion/vault.yml
+
+    # ── Cockpit ───────────────────────────────────────────────────────────
+    # Browser-based terminal + system monitor on port 9090.
+    # UFW blocks 9090 from the internet; accessible on LAN and via Tailscale.
+    bastion_cockpit_port: "9090"
+    # Your home LAN CIDR — UFW allows Cockpit from this range only.
+    bastion_lan_cidr: "192.168.0.0/24"
+    # Tailscale CGNAT range — also allowed for Cockpit access off-network.
+    _tailscale_cidr: "100.64.0.0/10"
+
+    # Approved algorithm sets (same conservative set as cis-harden.yml)
+    _ssh_ciphers: "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
+    _ssh_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    _ssh_kex: "curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256"
+
+    _login_banner: |
+      ########################################################################
+      # Authorized access only.  All activity may be monitored and reported.
+      # Disconnect immediately if you are not authorized.
+      ########################################################################
+
+  tasks:
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SYSTEM — hostname, timezone, packages
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: Set hostname
+    ansible.builtin.hostname:
+      name: "{{ bastion_hostname }}"
+    tags: [ bastion_system ]
+
+  - name: Set timezone
+    community.general.timezone:
+      name: "{{ bastion_timezone }}"
+    tags: [ bastion_system ]
+
+  - name: Update apt cache and upgrade packages
+    ansible.builtin.apt:
+      update_cache: true
+      upgrade: dist
+      cache_valid_time: 3600
+    tags: [ bastion_system ]
+
+  - name: Install minimal required packages
+    ansible.builtin.apt:
+      name:
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - openssh-server
+      - rsyslog
+      - curl
+      - ca-certificates
+      - gnupg
+      state: present
+    tags: [ bastion_system ]
+
+  - name: Enable unattended-upgrades (security patches only)
+    ansible.builtin.copy:
+      dest: /etc/apt/apt.conf.d/20auto-upgrades
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        APT::Periodic::Update-Package-Lists "1";
+        APT::Periodic::Unattended-Upgrade "1";
+        APT::Periodic::AutocleanInterval "7";
+    tags: [ bastion_system ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # JUMP ACCOUNT — minimal no-shell user for ProxyJump only
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: Create bastion jump account ({{ bastion_jump_user }})
+    ansible.builtin.user:
+      name: "{{ bastion_jump_user }}"
+      shell: /usr/sbin/nologin # prevents interactive login; ProxyJump still works
+      create_home: true
+      password: "!" # locked password — key auth only
+      state: present
+    tags: [ bastion_user ]
+
+  - name: Ensure .ssh dir exists for jump account
+    ansible.builtin.file:
+      path: "/home/{{ bastion_jump_user }}/.ssh"
+      state: directory
+      owner: "{{ bastion_jump_user }}"
+      group: "{{ bastion_jump_user }}"
+      mode: "0700"
+    tags: [ bastion_user ]
+
+  - name: Deploy authorized keys to jump account
+    ansible.posix.authorized_key:
+      user: "{{ bastion_jump_user }}"
+      key: "{{ lookup('file', item) }}"
+      state: present
+    loop: "{{ bastion_jump_pub_keys }}"
+    tags: [ bastion_user, bastion_ssh ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SSH — hardened sshd_config with AllowTcpForwarding YES (needed for jump)
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: Write login banner
+    ansible.builtin.copy:
+      dest: /etc/issue.net
+      content: "{{ _login_banner }}"
+      owner: root
+      group: root
+      mode: "0644"
+    tags: [ bastion_ssh ]
+
+  - name: Apply hardened sshd_config (bastion mode)
+    ansible.builtin.blockinfile:
+      path: /etc/ssh/sshd_config
+      block: |
+        # ── SSH Bastion Hardening ─────────────────────────────────────────
+        # Applied by setup-rpi-bastion.yml; do not edit this block manually.
+
+        Port {{ cis_bastion_ssh_port }}
+
+        # Only ansibleuser and the jump account may authenticate
+        AllowUsers ansibleuser {{ bastion_jump_user }}
+
+        # Key-only authentication
+        PasswordAuthentication no
+        ChallengeResponseAuthentication no
+        KbdInteractiveAuthentication no
+        PermitRootLogin no
+        PermitEmptyPasswords no
+
+        # REQUIRED for ProxyJump: allows direct-tcpip channel to internal hosts
+        AllowTcpForwarding yes
+        # Disable agent forwarding and X11 (not needed on a bastion)
+        AllowAgentForwarding no
+        X11Forwarding no
+        PermitTunnel no
+
+        # Logging — verbose for bastion audit trail
+        LogLevel VERBOSE
+        SyslogFacility AUTH
+
+        # Session limits
+        MaxAuthTries 3
+        MaxSessions 20             # allow multiple concurrent jumps
+        MaxStartups 20:30:100
+        LoginGraceTime 30
+        ClientAliveInterval 60
+        ClientAliveCountMax 3
+
+        # Approved algorithms (CIS-aligned)
+        Ciphers {{ _ssh_ciphers }}
+        MACs {{ _ssh_macs }}
+        KexAlgorithms {{ _ssh_kex }}
+
+        # Banners and misc
+        Banner /etc/issue.net
+        IgnoreRhosts yes
+        HostbasedAuthentication no
+        PermitUserEnvironment no
+        UsePAM yes
+      marker: "# {mark} BASTION SSH HARDENING BLOCK"
+      validate: "/usr/sbin/sshd -t -f %s"
+    notify: Restart sshd
+    tags: [ bastion_ssh ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # TAILSCALE — WireGuard-based subnet router
+  # Advertises 192.168.0.0/24 so every Tailnet device reaches internal hosts
+  # directly.  The WireGuard protocol is extremely bandwidth-efficient.
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: "[Tailscale] Add Tailscale apt signing key"
+    ansible.builtin.get_url:
+      url: https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg
+      dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+      owner: root
+      group: root
+      mode: "0644"
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Add Tailscale apt repository"
+    ansible.builtin.apt_repository:
+      repo: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian bookworm main"
+      filename: tailscale
+      state: present
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Install tailscale"
+    ansible.builtin.apt:
+      name: tailscale
+      state: present
+      update_cache: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Enable and start tailscaled"
+    ansible.builtin.service:
+      name: tailscaled
+      state: started
+      enabled: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Enable IPv4 forwarding for subnet routing"
+    ansible.posix.sysctl:
+      name: net.ipv4.ip_forward
+      value: "1"
+      sysctl_file: /etc/sysctl.d/99-tailscale.conf
+      reload: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Enable IPv6 forwarding for subnet routing"
+    ansible.posix.sysctl:
+      name: net.ipv6.conf.all.forwarding
+      value: "1"
+      sysctl_file: /etc/sysctl.d/99-tailscale.conf
+      reload: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Check current connection status"
+    ansible.builtin.command:
+      cmd: tailscale status --json
+    register: _ts_status
+    changed_when: false
+    failed_when: false
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Authenticate and advertise subnet route (auth key)"
+    ansible.builtin.command:
+      cmd: >-
+        tailscale up --authkey={{ bastion_tailscale_authkey }} --advertise-routes={{ bastion_subnet_route }} --accept-dns=false
+    when:
+    - bastion_tailscale_authkey | length > 0
+    - (_ts_status.stdout | from_json).BackendState | default('') != 'Running'
+    no_log: true # do not expose auth key in logs
+    changed_when: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Advertise subnet route (already authenticated)"
+    ansible.builtin.command:
+      cmd: >-
+        tailscale up --advertise-routes={{ bastion_subnet_route }} --accept-dns=false
+    when:
+    - bastion_tailscale_authkey | length == 0
+    - (_ts_status.stdout | from_json).BackendState | default('') == 'Running'
+    changed_when: true
+    tags: [ bastion_ts ]
+
+  - name: "[Tailscale] Print manual auth reminder"
+    ansible.builtin.debug:
+      msg:
+      - "Tailscale is installed but NOT yet authenticated."
+      - "Run manually on the RPi:"
+      - "  sudo tailscale up --advertise-routes={{ bastion_subnet_route }}"
+      - "Then approve the subnet route at:"
+      - "  https://login.tailscale.com/admin/machines"
+    when:
+    - bastion_tailscale_authkey | length == 0
+    - (_ts_status.stdout | from_json).BackendState | default('') != 'Running'
+    tags: [ bastion_ts ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # COCKPIT — lightweight browser terminal + system monitor (port 9090)
+  # Perfect for system maintenance: zero GUI overhead, SSH-level bandwidth.
+  # Access on LAN: https://192.168.0.<rpi>:9090
+  # Access off-network: https://<rpi-tailscale-ip>:9090
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: "[Cockpit] Install cockpit"
+    ansible.builtin.apt:
+      name:
+      - cockpit
+      state: present
+    tags: [ bastion_cockpit ]
+
+  - name: "[Cockpit] Enable and start cockpit.socket"
+    ansible.builtin.service:
+      name: cockpit.socket
+      state: started
+      enabled: true
+    tags: [ bastion_cockpit ]
+
+  - name: "[Cockpit] Restrict cockpit: disallow root login"
+    ansible.builtin.copy:
+      dest: /etc/cockpit/disallowed-users
+      content: "root\n"
+      owner: root
+      group: root
+      mode: "0644"
+    tags: [ bastion_cockpit ]
+
+  - name: "[Cockpit] Write cockpit origin restriction"
+    ansible.builtin.copy:
+      dest: /etc/cockpit/cockpit.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        [WebService]
+        # Only accept connections from LAN and Tailscale CGNAT range.
+        # Cockpit port 9090 is additionally blocked from internet via UFW.
+        Origins = https://{{ bastion_hostname }}:{{ bastion_cockpit_port }} wss://{{ bastion_hostname }}:{{ bastion_cockpit_port }}
+        ProtocolHeader = X-Forwarded-Proto
+    tags: [ bastion_cockpit ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # UFW — expose SSH bastion port; harden Cockpit to LAN + Tailscale only
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: "UFW: allow SSH on port {{ cis_bastion_ssh_port }} BEFORE enabling"
+    community.general.ufw:
+      rule: allow
+      port: "{{ cis_bastion_ssh_port | string }}"
+      proto: tcp
+      comment: "SSH bastion"
+    tags: [ bastion_ufw ]
+
+  - name: "UFW: allow Cockpit from LAN only ({{ bastion_lan_cidr }})"
+    community.general.ufw:
+      rule: allow
+      port: "{{ bastion_cockpit_port }}"
+      proto: tcp
+      src: "{{ bastion_lan_cidr }}"
+      comment: "Cockpit browser terminal — LAN"
+    tags: [ bastion_ufw, bastion_cockpit ]
+
+  - name: "UFW: allow Cockpit from Tailscale CGNAT range"
+    community.general.ufw:
+      rule: allow
+      port: "{{ bastion_cockpit_port }}"
+      proto: tcp
+      src: "{{ _tailscale_cidr }}"
+      comment: "Cockpit browser terminal — Tailscale"
+    tags: [ bastion_ufw, bastion_cockpit ]
+
+  - name: "UFW: allow Tailscale WireGuard UDP"
+    community.general.ufw:
+      rule: allow
+      port: "41641"
+      proto: udp
+      comment: "Tailscale WireGuard"
+    tags: [ bastion_ufw, bastion_ts ]
+
+  - name: "UFW: default deny incoming, allow outgoing"
+    community.general.ufw:
+      state: enabled
+      default: deny
+      direction: incoming
+    tags: [ bastion_ufw ]
+
+  - name: "UFW: allow outgoing"
+    community.general.ufw:
+      default: allow
+      direction: outgoing
+    tags: [ bastion_ufw ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # FAIL2BAN — brute-force protection for the exposed SSH port
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: Write fail2ban sshd jail config
+    ansible.builtin.copy:
+      dest: /etc/fail2ban/jail.d/sshd-bastion.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        [sshd]
+        enabled  = true
+        port     = {{ cis_bastion_ssh_port }}
+        filter   = sshd
+        logpath  = %(syslog_authpriv)s
+        maxretry = 3
+        findtime = 600
+        bantime  = 3600
+        ignoreip = 127.0.0.1/8 ::1
+    notify: Restart fail2ban
+    tags: [ bastion_f2b ]
+
+  - name: Ensure fail2ban is started and enabled
+    ansible.builtin.service:
+      name: fail2ban
+      state: started
+      enabled: true
+    tags: [ bastion_f2b ]
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SUMMARY
+  # ════════════════════════════════════════════════════════════════════════
+
+  - name: Print bastion setup summary
+    ansible.builtin.debug:
+      msg:
+      - "================================================================"
+      - "RPi Bastion configured: {{ inventory_hostname }}"
+      - "  Hostname:     {{ bastion_hostname }}"
+      - "  SSH port:     {{ cis_bastion_ssh_port }}"
+      - "  Jump user:    {{ bastion_jump_user }} (nologin shell)"
+      - "  AllowUsers:   ansibleuser {{ bastion_jump_user }}"
+      - "  TCP forward:  YES (required for ProxyJump)"
+      - "  Fail2ban:     enabled (max 3 retries / hour ban)"
+      - "  UFW:          deny-incoming; SSH {{ cis_bastion_ssh_port }}, Tailscale 41641/udp,"
+      - "                Cockpit 9090 (LAN {{ bastion_lan_cidr }} + Tailscale {{ _tailscale_cidr }} only)"
+      - "  Tailscale:    installed — subnet route {{ bastion_subnet_route }}"
+      - "  Cockpit:      https://{{ bastion_hostname }}:{{ bastion_cockpit_port }}"
+      - "                (browser terminal + system monitor)"
+      - "  Next steps:"
+      - "    1. Approve subnet route in Tailscale admin console:"
+      - "       https://login.tailscale.com/admin/machines"
+      - "    2. Install Tailscale on your laptop, join the same Tailnet"
+      - "    3. See docs/ssh-access.md for ~/.ssh/config setup"
+      - "================================================================"
+    tags: [ bastion_ssh ]
+
+  handlers:
+  - name: Restart sshd
+    ansible.builtin.service:
+      name: ssh
+      state: restarted
+
+  - name: Restart fail2ban
+    ansible.builtin.service:
+      name: fail2ban
+      state: restarted

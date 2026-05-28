@@ -1,0 +1,42 @@
+[server]
+host = "0.0.0.0"
+port = {{ optiping_port | default(8080) }}
+title = "{{ optiping_title | default('OptiPing Status') }}"
+description = "{{ optiping_description | default('System uptime monitor') }}"
+timezone = "{{ optiping_timezone | default('UTC') }}"
+
+[auth]
+enabled = {{ optiping_auth_enabled | default(false) | lower }}
+username = "{{ optiping_auth_username | default('admin') }}"
+password = "{{ vault_optiping_password | default('changeme') }}"
+admin_password = "{{ vault_optiping_admin_password | default('changeme') }}"
+totp_secret = "{{ vault_optiping_totp_secret | default('') }}"
+
+[defaults]
+interval = {{ optiping_default_interval | default(60) }}
+timeout = {{ optiping_default_timeout | default(5) }}
+retries = {{ optiping_default_retries | default(3) }}
+
+[database]
+path = "optiping.db"
+retention_days = {{ optiping_retention_days | default(30) }}
+
+[logging]
+level = "{{ optiping_log_level | default('INFO') }}"
+file = "optiping.log"
+console = true
+{% if optiping_monitors is defined and optiping_monitors | length > 0 %}
+
+{% for monitor in optiping_monitors %}
+[[monitors]]
+name = "{{ monitor.name }}"
+target = "{{ monitor.target }}"
+{% if monitor.interval is defined %}
+interval = {{ monitor.interval }}
+{% endif %}
+{% if monitor.timeout is defined %}
+timeout = {{ monitor.timeout }}
+{% endif %}
+
+{% endfor %}
+{% endif %}

@@ -1,0 +1,346 @@
+---
+# deploy-optiping.yml
+# Deploys (or updates) OptiPing — a lightweight self-hosted uptime monitor.
+# Source: https://github.com/BeanGreen247/OptiPing
+# Deploy path: /opt/optiping   Service user: root (required for ping3 raw sockets)
+#
+# Prerequisites
+#   1. ansibleuser must already be bootstrapped on lxc-optiping:
+#        ansible-playbook setup-ansibleuser.yml --limit lxc-optiping -u root --ask-pass
+#   2. host_vars/lxc-optiping/vault.yml must be encrypted and contain:
+#        vault_become_password:          <sudoer password for ansibleuser>
+#        vault_optiping_password:        <admin UI password>
+#        vault_optiping_admin_password:  <admin UI password (same or different)>
+#        vault_optiping_totp_secret:     <base32 TOTP secret, or '' to disable>
+#      Encrypt with:  ansible-vault encrypt host_vars/lxc-optiping/vault.yml
+#   3. Configure monitors and other settings in host_vars/lxc-optiping/main.yml
+#      (see variable reference below).
+#
+# Variable reference (set in host_vars/lxc-optiping/main.yml or group_vars):
+#   optiping_port              Web UI port          (default: 8080)
+#   optiping_title             Dashboard title      (default: "OptiPing Status")
+#   optiping_description       Dashboard subtitle   (default: "System uptime monitor")
+#   optiping_timezone          Display timezone     (default: "UTC")
+#   optiping_auth_enabled      Enable login page    (default: false)
+#   optiping_auth_username     Admin username       (default: "admin")
+#   optiping_default_interval  Check interval (s)   (default: 60)
+#   optiping_default_timeout   Check timeout (s)    (default: 5)
+#   optiping_default_retries   Retry count          (default: 3)
+#   optiping_retention_days    DB retention days    (default: 30)
+#   optiping_log_level         Log level            (default: "INFO")
+#   optiping_monitors          List of monitor dicts, e.g.:
+#     - { name: "Google DNS", target: "8.8.8.8", interval: 30 }
+#     - { name: "Router",     target: "192.168.0.1:80" }
+#     - { name: "Cloudflare", target: "https://www.cloudflare.com" }
+#   optiping_repo_url          Git repo URL         (default: https://github.com/BeanGreen247/OptiPing.git)
+#   optiping_repo_version      Branch/tag to deploy (default: master)
+#
+# Usage:
+#   ansible-playbook deploy-optiping.yml                         # full deploy/update
+#   ansible-playbook deploy-optiping.yml --tags install          # packages + git clone only
+#   ansible-playbook deploy-optiping.yml --tags config           # regenerate config.toml only
+#   ansible-playbook deploy-optiping.yml --tags service          # restart service only
+#   ansible-playbook deploy-optiping.yml --tags test             # verify service is healthy
+#
+# Re-run at any time — all tasks are idempotent.
+# The database (optiping.db) and log (optiping.log) are preserved on updates.
+
+- name: Deploy OptiPing uptime monitor
+  hosts: lxc-optiping
+  become: true
+  gather_facts: true
+
+  vars:
+    optiping_install_dir: /opt/optiping
+    optiping_staging_dir: /root/OptiPing
+    _optiping_repo_url: "{{ optiping_repo_url | default('https://github.com/BeanGreen247/OptiPing.git') }}"
+    _optiping_repo_version: "{{ optiping_repo_version | default('master') }}"
+    optiping_service_name: optiping
+    optiping_service_file: /etc/systemd/system/optiping.service
+    optiping_config_file: "{{ optiping_install_dir }}/config.toml"
+
+  tasks:
+
+  # 0) Show target host
+  - name: "[optiping] Show deployment target"
+    ansible.builtin.debug:
+      msg: "Deploying OptiPing → {{ inventory_hostname }} ({{ ansible_host }})  branch/tag: {{ _optiping_repo_version }}"
+    tags: [ always ]
+
+  # 1) System packages
+  - name: "[optiping] Update APT cache"
+    ansible.builtin.apt:
+      update_cache: true
+      cache_valid_time: 3600
+    tags: [ install ]
+
+  - name: "[optiping] Install Python 3, pip, git, and virtualenv support"
+    ansible.builtin.apt:
+      name:
+      - python3
+      - python3-pip
+      - python3-venv
+      - git
+      - curl
+      - rsync
+      state: present
+    tags: [ install ]
+
+  # 2) Clone / update repo into staging dir, then sync to install dir
+  - name: "[optiping] Clone or update OptiPing staging repo"
+    ansible.builtin.git:
+      repo: "{{ _optiping_repo_url }}"
+      dest: "{{ optiping_staging_dir }}"
+      version: "{{ optiping_repo_version | default('main') }}"
+      force: false
+    register: _optiping_git
+    tags: [ install ]
+
+  - name: "[optiping] Ensure install dir exists"
+    ansible.builtin.file:
+      path: "{{ optiping_install_dir }}"
+      state: directory
+      owner: root
+      group: root
+      mode: "0755"
+    tags: [ install ]
+
+  - name: "[optiping] Sync staging to install dir (preserves config.toml, db, log)"
+    ansible.builtin.command:
+      cmd: >-
+        rsync -a --delete
+        --exclude=config.toml
+        --exclude=optiping.db
+        --exclude=optiping.log
+        --exclude=venv
+        {{ optiping_staging_dir }}/
+        {{ optiping_install_dir }}/
+    changed_when: false
+    tags: [ install ]
+
+  # 3) Python dependencies (venv)
+  - name: "[optiping] Create Python venv"
+    ansible.builtin.command:
+      cmd: python3 -m venv "{{ optiping_install_dir }}/venv"
+      creates: "{{ optiping_install_dir }}/venv/bin/activate"
+    tags: [ install ]
+
+  - name: "[optiping] Install pip dependencies into venv"
+    ansible.builtin.pip:
+      requirements: "{{ optiping_install_dir }}/requirements.txt"
+      virtualenv: "{{ optiping_install_dir }}/venv"
+    tags: [ install ]
+
+  # 4) Config file (skip if one already exists on the host)
+  - name: "[optiping] Check if config.toml already exists"
+    ansible.builtin.stat:
+      path: "{{ optiping_config_file }}"
+    register: _optiping_cfg
+    tags: [ config ]
+
+  - name: "[optiping] Deploy config.toml from template (skipped if config already present)"
+    ansible.builtin.template:
+      src: optiping-config.toml.j2
+      dest: "{{ optiping_config_file }}"
+      owner: root
+      group: root
+      mode: "0600"
+    when: not _optiping_cfg.stat.exists or (optiping_force_config | default(false) | bool)
+    notify: Restart optiping
+    tags: [ config ]
+
+  - name: "[optiping] NOTICE — existing config.toml left untouched"
+    ansible.builtin.debug:
+      msg: "config.toml already exists at {{ optiping_config_file }} — skipping. To force overwrite run with -e optiping_force_config=true"
+    when: _optiping_cfg.stat.exists and not (optiping_force_config | default(false) | bool)
+    tags: [ config ]
+
+  # 5) systemd unit
+  - name: "[optiping] Deploy systemd unit file"
+    ansible.builtin.copy:
+      dest: "{{ optiping_service_file }}"
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        [Unit]
+        Description=OptiPing uptime monitor
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=root
+        WorkingDirectory={{ optiping_install_dir }}
+        ExecStart={{ optiping_install_dir }}/venv/bin/python {{ optiping_install_dir }}/uptime_monitor.py --config {{ optiping_config_file }}
+        Restart=on-failure
+        RestartSec=5
+        KillSignal=SIGTERM
+        KillMode=mixed
+        TimeoutStopSec=15
+
+        [Install]
+        WantedBy=multi-user.target
+    notify: Reload systemd and restart optiping
+    tags: [ service ]
+
+  - name: "[optiping] Reload systemd daemon"
+    ansible.builtin.systemd:
+      daemon_reload: true
+    tags: [ service ]
+
+  # 6) Firewall — allow port 8080
+  - name: "[ufw] Check if UFW is active"
+    ansible.builtin.command:
+      cmd: ufw status
+    register: _ufw_status
+    changed_when: false
+    failed_when: false
+    tags: [ service ]
+
+  - name: "[ufw] Allow inbound TCP on OptiPing port"
+    community.general.ufw:
+      rule: allow
+      port: "{{ optiping_port | default('8080') }}"
+      proto: tcp
+      comment: "OptiPing web UI"
+    when: "'Status: active' in _ufw_status.stdout"
+    tags: [ service ]
+
+  # 7) Enable and start service
+  - name: "[optiping] Enable and start optiping service"
+    ansible.builtin.systemd:
+      name: "{{ optiping_service_name }}"
+      enabled: true
+      state: started
+    tags: [ service ]
+
+  # 8) Update OptiPing (git pull in staging → rsync to install dir → pip sync → restart)
+  #    Run standalone:  ansible-playbook deploy-optiping.yml --tags update
+  - name: "[optiping][update] Pull latest code into staging dir"
+    ansible.builtin.git:
+      repo: "{{ _optiping_repo_url }}"
+      dest: "{{ optiping_staging_dir }}"
+      version: "{{ _optiping_repo_version }}"
+      force: true
+    register: _optiping_update
+    tags: [ update ]
+
+  - name: "[optiping][update] Sync updated code to install dir"
+    ansible.builtin.command:
+      cmd: >-
+        rsync -a --delete
+        --exclude=config.toml
+        --exclude=optiping.db
+        --exclude=optiping.log
+        --exclude=venv
+        {{ optiping_staging_dir }}/
+        {{ optiping_install_dir }}/
+    changed_when: false
+    tags: [ update ]
+
+  - name: "[optiping][update] Verify core Python files match staging"
+    ansible.builtin.shell: >-
+      diff
+      <(cd {{ optiping_staging_dir }} && find . -name '*.py' -not -path '*/venv/*' | sort | xargs md5sum)
+      <(cd {{ optiping_install_dir }} && find . -name '*.py' -not -path '*/venv/*' | sort | xargs md5sum)
+    args:
+      executable: /bin/bash
+    when: _optiping_update.changed
+    register: _optiping_pycheck
+    changed_when: false
+    failed_when: _optiping_pycheck.rc != 0
+    tags: [ update ]
+
+  - name: "[optiping][update] Sync pip dependencies (in case requirements.txt changed)"
+    ansible.builtin.pip:
+      requirements: "{{ optiping_install_dir }}/requirements.txt"
+      virtualenv: "{{ optiping_install_dir }}/venv"
+    when: _optiping_update.changed
+    tags: [ update ]
+
+  - name: "[optiping][update] Restart service"
+    ansible.builtin.systemd:
+      name: "{{ optiping_service_name }}"
+      state: restarted
+    tags: [ update ]
+
+  - name: "[optiping][update] Report update result"
+    ansible.builtin.debug:
+      msg: >-
+        {{ 'Updated to ' + _optiping_update.after[:8] + ' (was ' + _optiping_update.before[:8] + ') — service restarted.'
+           if _optiping_update.changed else
+           'Already up to date (' + (_optiping_update.after | default('unknown'))[:8] + ') — no restart needed.' }}
+    tags: [ update ]
+
+  - name: "[optiping][update] Verify service is active"
+    ansible.builtin.systemd:
+      name: "{{ optiping_service_name }}"
+    register: _optiping_svc_check
+    changed_when: false
+    tags: [ update ]
+
+  - name: "[optiping][update] Assert service is running"
+    ansible.builtin.assert:
+      that:
+      - _optiping_svc_check.status is defined
+      - _optiping_svc_check.status.ActiveState == 'active'
+      fail_msg: "optiping.service is NOT running on {{ inventory_hostname }} — check journalctl -u optiping"
+      success_msg: "optiping.service is running on {{ inventory_hostname }} ({{ ansible_host }}:{{ optiping_port | default(8080) }})"
+    tags: [ update ]
+
+  - name: "[optiping][update] Verify web UI is reachable on port {{ optiping_port | default(8080) }}"
+    ansible.builtin.wait_for:
+      host: "127.0.0.1"
+      port: "{{ optiping_port | default(8080) }}"
+      timeout: 15
+      state: started
+    tags: [ update ]
+
+  # 9) Test / verify
+  - name: "[optiping][test] Check service is running"
+    ansible.builtin.systemd:
+      name: "{{ optiping_service_name }}"
+    register: _optiping_svc
+    changed_when: false
+    tags: [ test ]
+
+  - name: "[optiping][test] Assert service is active"
+    ansible.builtin.assert:
+      that:
+      - _optiping_svc.status is defined
+      - _optiping_svc.status.ActiveState == 'active'
+      fail_msg: "optiping.service is NOT running on {{ inventory_hostname }} ({{ ansible_host }})"
+      success_msg: "optiping.service is running on {{ inventory_hostname }} ({{ ansible_host }})"
+    tags: [ test ]
+
+  - name: "[optiping][test] Wait for web UI to respond on port {{ optiping_port | default(8080) }}"
+    ansible.builtin.wait_for:
+      host: "127.0.0.1"
+      port: "{{ optiping_port | default(8080) }}"
+      timeout: 15
+      state: started
+    tags: [ test ]
+
+  - name: "[optiping][test] Summary"
+    ansible.builtin.debug:
+      msg:
+      - "========================================================"
+      - "OptiPing deployment complete"
+      - "  Host:     {{ inventory_hostname }} ({{ ansible_host }})"
+      - "  Version:  {{ _optiping_repo_version }} — git changed: {{ _optiping_git.changed | default('n/a') }}"
+      - "  UI:       http://{{ ansible_host }}:{{ optiping_port | default(8080) }}"
+      - "========================================================"
+    tags: [ test ]
+
+  # Handlers
+  handlers:
+  - name: Restart optiping
+    ansible.builtin.systemd:
+      name: "{{ optiping_service_name }}"
+      state: restarted
+
+  - name: Reload systemd and restart optiping
+    ansible.builtin.systemd:
+      daemon_reload: true
+      name: "{{ optiping_service_name }}"
+      state: restarted

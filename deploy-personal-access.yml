@@ -1,0 +1,150 @@
+# deploy-personal-access.yml
+# Ensure the personal end-user account (vm_enduser_name) exists with your SSH
+# key on every LXC and VM so you can reach all hosts from your laptop directly.
+#
+# Background
+#   cis-harden.yml locks sshd to: AllowUsers ansibleuser <vm_enduser_name>
+#   This playbook makes sure <vm_enduser_name> actually exists everywhere and
+#   has your laptop's public key in its authorized_keys — even on LXCs that
+#   were never passed through setup-debian-base.yml.
+#
+# Variables (set in preseed_vars.yml or override on CLI)
+#   vm_enduser_name          — login username  (e.g. "cartman")
+#   vm_enduser_ssh_pub_key_file — path to your laptop's public key
+#                                 (default: ~/.ssh/id_rsa.pub)
+#   vm_enduser_groups        — supplementary groups  (default: "sudo")
+#   vm_enduser_shell         — login shell           (default: /bin/bash)
+#   vm_enduser_password_hash — vaulted SHA-512 hash, or '!' for key-only
+#
+# Usage
+#   ansible-playbook deploy-personal-access.yml
+#   ansible-playbook deploy-personal-access.yml --limit lxcs
+#   ansible-playbook deploy-personal-access.yml -e vm_enduser_name=cartman
+#   ansible-playbook deploy-personal-access.yml --tags ssh_key   # key only
+#
+# Re-running
+#   Fully idempotent.  Safe to run after adding new hosts.
+---
+- name: Deploy personal user SSH access to all LXCs and VMs
+  hosts: lxcs:vms
+  gather_facts: true
+  become: true
+  ignore_unreachable: true
+
+  vars:
+    _personal_user: "{{ vm_enduser_name | default('') }}"
+    _pub_key_file: "{{ vm_enduser_ssh_pub_key_file | default('~/.ssh/id_rsa.pub') }}"
+    _user_groups: "{{ vm_enduser_groups | default('sudo') }}"
+    _user_shell_debian: "{{ vm_enduser_shell | default('/bin/bash') }}"
+    _user_shell_alpine: "/bin/ash"
+    _is_alpine: "{{ ansible_os_family | default('') == 'Alpine' }}"
+    _user_shell: "{{ _user_shell_alpine if _is_alpine | bool else _user_shell_debian }}"
+
+  pre_tasks:
+  - name: Abort if vm_enduser_name is not configured
+    ansible.builtin.fail:
+      msg: >
+        vm_enduser_name is not set. Define it in group_vars/all/preseed_vars.yml or pass -e vm_enduser_name=<name>.
+    when: _personal_user | length == 0
+
+  tasks:
+
+  # ── User account ──────────────────────────────────────────────────────
+
+  - name: Ensure personal user group exists
+    ansible.builtin.group:
+      name: "{{ _personal_user }}"
+      state: present
+    tags: [ access, user ]
+
+  - name: Ensure personal user account exists
+    ansible.builtin.user:
+      name: "{{ _personal_user }}"
+      group: "{{ _personal_user }}"
+      groups: "{{ _user_groups }}"
+      append: true
+      shell: "{{ _user_shell }}"
+      create_home: true
+      password: "{{ vm_enduser_password_hash | default('!') }}"
+      state: present
+    tags: [ access, user ]
+
+  # Alpine: sudo group may not exist — add via sudoers.d instead
+  - name: Grant personal user sudo on Alpine
+    ansible.builtin.copy:
+      dest: "/etc/sudoers.d/{{ _personal_user }}"
+      content: "{{ _personal_user }} ALL=(ALL:ALL) ALL\n"
+      owner: root
+      group: root
+      mode: "0440"
+      validate: "visudo -cf %s"
+    when: _is_alpine | bool
+    tags: [ access, sudo ]
+
+  # ── SSH key ───────────────────────────────────────────────────────────
+
+  - name: Ensure .ssh directory exists for personal user
+    ansible.builtin.file:
+      path: "/home/{{ _personal_user }}/.ssh"
+      state: directory
+      owner: "{{ _personal_user }}"
+      group: "{{ _personal_user }}"
+      mode: "0700"
+    tags: [ access, ssh_key ]
+
+  - name: Deploy laptop SSH public key to personal user
+    ansible.posix.authorized_key:
+      user: "{{ _personal_user }}"
+      key: "{{ lookup('file', _pub_key_file) }}"
+      state: present
+    tags: [ access, ssh_key ]
+
+  # ── Verify AllowUsers covers personal user ────────────────────────────
+  # cis-harden.yml already writes: AllowUsers ansibleuser <vm_enduser_name>
+  # This task is a safety net — it adds the user if the CIS block is absent
+  # (e.g. CIS hardening has not been run yet on this host).
+
+  - name: Check if CIS SSH block is present
+    ansible.builtin.command:
+      cmd: grep -q "CIS SSH HARDENING BLOCK" /etc/ssh/sshd_config
+    register: _cis_block_check
+    changed_when: false
+    failed_when: false
+    tags: [ access, allowusers ]
+
+  - name: Ensure personal user is in AllowUsers (fallback if CIS block missing)
+    ansible.builtin.lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: "^AllowUsers "
+      line: "AllowUsers ansibleuser {{ _personal_user }}"
+      validate: "/usr/sbin/sshd -t -f %s"
+      backup: true
+    when: _cis_block_check.rc != 0
+    notify: Restart sshd
+    tags: [ access, allowusers ]
+
+  # ── Verify sshd config validates before restart ───────────────────────
+  - name: Validate sshd_config syntax
+    ansible.builtin.command:
+      cmd: sshd -t
+    changed_when: false
+    tags: [ access ]
+
+  # ── Summary ───────────────────────────────────────────────────────────
+  - name: Report access deployment result
+    ansible.builtin.debug:
+      msg:
+      - "================================================================"
+      - "Personal access deployed: {{ inventory_hostname }}"
+      - "  User:    {{ _personal_user }}"
+      - "  Key:     {{ _pub_key_file }}"
+      - "  SSH:     key-only (PasswordAuthentication remains off)"
+      - "  sudo:    via '{{ _user_groups }}' group{{ ' + sudoers.d' if _is_alpine | bool else '' }}"
+      - "================================================================"
+    tags: [ access ]
+
+  handlers:
+  - name: Restart sshd
+    ansible.builtin.service:
+      name: "{{ 'sshd' if _is_alpine | bool else 'ssh' }}"
+      state: restarted
