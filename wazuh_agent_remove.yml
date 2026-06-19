@@ -1,0 +1,143 @@
+---
+# wazuh_agent_remove.yml
+# Stops, purges, and cleans up the Wazuh agent from all apt-based hosts.
+# Removes: wazuh-agent package, /var/ossec, APT repo, GPG key, UFW rules.
+# Alpine and other non-apt hosts are skipped automatically.
+# lxc-wazuh is skipped (already decommissioned — no need to target it).
+#
+# Usage:
+#   ansible-playbook wazuh_agent_remove.yml              # all vms + lxcs
+#   ansible-playbook wazuh_agent_remove.yml --limit vms
+#   ansible-playbook wazuh_agent_remove.yml --limit lxcs:!lxc-wazuh
+#   ansible-playbook wazuh_agent_remove.yml --limit lxc-prometheus
+
+- name: Remove Wazuh agent from apt-based Linux hosts
+  hosts: all
+  gather_facts: true
+  become: true
+  ignore_unreachable: true
+
+  vars:
+    wazuh_manager_ip: "192.168.0.243"
+
+  tasks:
+
+  - name: "[wazuh-remove] Show inventory host details"
+    ansible.builtin.debug:
+      msg: "Host: {{ inventory_hostname }}  →  IP (ansible_host): {{ ansible_host }}"
+    tags: [ always ]
+
+  - name: Skip non-apt hosts (Alpine, etc.)
+    when: ansible_pkg_mgr != 'apt'
+    block:
+    - name: "[wazuh-remove] NOTICE — non-apt host, skipping"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} uses {{ ansible_pkg_mgr }} ({{ ansible_distribution }}). Nothing to remove on this host.
+    - name: End host — non-apt system
+      ansible.builtin.meta: end_host
+
+  - name: Skip lxc-wazuh (already decommissioned)
+    ansible.builtin.meta: end_host
+    when: inventory_hostname == 'lxc-wazuh'
+
+  # Check whether wazuh-agent is installed at all
+
+  - name: "[wazuh-remove] Check if wazuh-agent is installed"
+    ansible.builtin.command:
+      cmd: dpkg-query -W -f='${Status}' wazuh-agent
+    register: wazuh_pkg_status
+    failed_when: false
+    changed_when: false
+
+  # Service — stop and disable before removal
+
+  - name: "[wazuh-remove] Stop and disable wazuh-agent service"
+    ansible.builtin.systemd:
+      name: wazuh-agent
+      state: stopped
+      enabled: false
+    when: "'install ok installed' in wazuh_pkg_status.stdout"
+    failed_when: false
+
+  # Package removal
+
+  - name: "[wazuh-remove] Unhold wazuh-agent package (clear dpkg hold)"
+    ansible.builtin.dpkg_selections:
+      name: wazuh-agent
+      selection: install
+    when: "'install ok installed' in wazuh_pkg_status.stdout"
+    failed_when: false
+
+  - name: "[wazuh-remove] Purge wazuh-agent package"
+    ansible.builtin.apt:
+      name: wazuh-agent
+      state: absent
+      purge: true
+      autoremove: true
+    when: "'install ok installed' in wazuh_pkg_status.stdout"
+
+  # Leftover data directory
+
+  - name: "[wazuh-remove] Remove /var/ossec directory"
+    ansible.builtin.file:
+      path: /var/ossec
+      state: absent
+
+  # APT repository
+
+  - name: "[wazuh-remove] Remove Wazuh APT repository"
+    ansible.builtin.apt_repository:
+      repo: "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+      filename: wazuh
+      state: absent
+      update_cache: true
+
+  - name: "[wazuh-remove] Remove /etc/apt/sources.list.d/wazuh.list if still present"
+    ansible.builtin.file:
+      path: /etc/apt/sources.list.d/wazuh.list
+      state: absent
+
+  # GPG key
+
+  - name: "[wazuh-remove] Remove Wazuh GPG keyring"
+    ansible.builtin.file:
+      path: /usr/share/keyrings/wazuh.gpg
+      state: absent
+
+  # UFW — remove outbound rules added during deploy
+
+  - name: "[ufw] Check if UFW is active"
+    ansible.builtin.command:
+      cmd: ufw status
+    register: ufw_status
+    changed_when: false
+    failed_when: false
+
+  - name: "[ufw] Remove outbound rule — port 1514 (agent comms)"
+    community.general.ufw:
+      rule: allow
+      direction: out
+      dest: "{{ wazuh_manager_ip }}"
+      port: "1514"
+      proto: tcp
+      delete: true
+    when: "'Status: active' in ufw_status.stdout"
+    failed_when: false
+
+  - name: "[ufw] Remove outbound rule — port 1515 (agent enrollment)"
+    community.general.ufw:
+      rule: allow
+      direction: out
+      dest: "{{ wazuh_manager_ip }}"
+      port: "1515"
+      proto: tcp
+      delete: true
+    when: "'Status: active' in ufw_status.stdout"
+    failed_when: false
+
+  # Done
+
+  - name: "[wazuh-remove] Confirm cleanup complete"
+    ansible.builtin.debug:
+      msg: "Wazuh agent removed from {{ inventory_hostname }} ({{ ansible_host }})"

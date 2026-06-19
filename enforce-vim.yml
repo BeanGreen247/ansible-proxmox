@@ -1,0 +1,331 @@
+# enforce-vim.yml - Install vim, remove nano, set vim as default editor
+#
+# Overview
+#   Enforces vim as the one true editor across all managed hosts.
+#   Removes nano, sets vim as the system default via update-alternatives,
+#   configures git system-wide to use vim, and drops a /usr/local/bin/nano
+#   shim that reminds the user of their poor life choices before refusing
+#   to open. Idempotent - safe to re-run at any time.
+#
+# What this playbook does
+#   PLAY 1 - package manager pre-flight (runs first on every host)
+#       Debian/Ubuntu: dpkg --configure -a  →  apt-get clean
+#                      →  purge broken vim packages  →  apt-get -f install
+#                      →  apt-get update
+#       Alpine:        apk fix  →  apk update
+#
+#   PLAY 2 - vim enforcement
+#       * Installs vim + vim-runtime (--reinstall if vim is not functional)
+#       * Removes nano + purge
+#       * Sets vim as default editor via update-alternatives (Debian)
+#       * Sets EDITOR and VISUAL in /etc/environment
+#       * Deploys /usr/local/bin/nano shim that refuses to open
+#
+#   PLAY 3 - git system-wide editor
+#       * Installs git if not present
+#       * Sets core.editor = vim in /etc/gitconfig (all users, world-readable)
+#
+# Target hosts
+#   Defaults to all managed hosts. Narrow with --limit:
+#     ansible-playbook -i inventory/hosts.ini enforce-vim.yml --limit lxcs
+#
+# Notes
+#   ansible_os_family is guarded with | default('') throughout so that hosts
+#   which are unreachable (no facts gathered) skip cleanly instead of erroring.
+#
+# Credit: Thomas Mozdren
+---
+
+# =============================================================================
+# PLAY 1 - Package manager pre-flight: repair + update before touching packages
+# =============================================================================
+- name: Pre-flight - repair and update package managers
+  hosts: all
+  become: true
+  gather_facts: true
+  ignore_unreachable: true
+
+  tasks:
+
+  # --- Debian / Ubuntu -------------------------------------------------------
+
+  # Reconfigure any packages left in a partially-configured state.
+  # May exit 1 when a dependency is missing - that is expected and handled
+  # by apt-get -f install below.
+  - name: "[Debian] Reconfigure interrupted dpkg state"
+    ansible.builtin.command: dpkg --configure -a
+    changed_when: false
+    failed_when: false
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ preflight, packages ]
+
+  # Purge only vim-family packages if they are in a broken dpkg state.
+  # dpkg second-column status chars targeted:
+  #   U = unpacked        F = half-configured
+  #   H = half-installed  c = config-files-only (apt says "installed",
+  #                           dpkg dependency resolver says "not installed")
+  # Never blanket-purge unknown packages - could hit essential system libs.
+  - name: "[Debian] Force-purge broken vim packages"
+    ansible.builtin.shell: |
+      for pkg in vim vim-runtime vim-common vim-tiny; do
+        if dpkg -l "$pkg" 2>/dev/null | grep -qE '^.[UFHc]'; then
+          dpkg --force-remove-reinstreq --purge "$pkg" 2>/dev/null || true
+        fi
+      done
+    args:
+      executable: /bin/sh
+    changed_when: false
+    failed_when: false
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ preflight, packages ]
+
+  # Clear the local .deb cache so apt re-downloads rather than reusing a
+  # stale archive that may be inconsistent with the dpkg status database.
+  - name: "[Debian] Clear APT package cache"
+    ansible.builtin.command: apt-get clean
+    changed_when: false
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ preflight, packages ]
+
+  # Resolve any remaining broken dependency chains.
+  - name: "[Debian] Fix broken package dependencies"
+    ansible.builtin.command: apt-get -f install -y
+    changed_when: false
+    failed_when: false
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ preflight, packages ]
+
+  - name: "[Debian] Update APT package index"
+    ansible.builtin.apt:
+      update_cache: true
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ preflight, packages ]
+
+  # --- Alpine ----------------------------------------------------------------
+
+  - name: "[Alpine] Repair apk package database"
+    ansible.builtin.command: apk fix
+    changed_when: false
+    when: ansible_os_family | default('') == "Alpine"
+    tags: [ preflight, packages ]
+
+  - name: "[Alpine] Update apk package index"
+    ansible.builtin.command: apk update
+    changed_when: false
+    when: ansible_os_family | default('') == "Alpine"
+    tags: [ preflight, packages ]
+
+
+# =============================================================================
+# PLAY 2 - Enforce vim: install, remove nano, configure as default editor
+# =============================================================================
+- name: Enforce vim as the one true editor
+  hosts: all
+  become: true
+  gather_facts: true
+  ignore_unreachable: true
+
+  tasks:
+
+  # --- Install vim -----------------------------------------------------------
+
+  # Use --reinstall to handle the edge case where dpkg's status database says
+  # vim-runtime is "install ok installed" but the package is actually broken
+  # (dpkg -l shows ii, apt says "already newest", but vim cannot find it as a
+  # dependency). --reinstall forces a fresh download and reconfiguration even
+  # when apt thinks the package is current.
+  # Skip the reinstall when vim is already functional to keep re-runs fast.
+  - name: "[Debian] Install vim + vim-runtime (reinstall if broken)"
+    ansible.builtin.shell: |
+      if vim --version >/dev/null 2>&1; then
+        echo "VIM_ALREADY_OK"
+        exit 0
+      fi
+      apt-get install --reinstall -y vim-runtime
+      apt-get install -y vim vim-runtime
+    args:
+      executable: /bin/sh
+    register: _vim_deb_install
+    changed_when: "'VIM_ALREADY_OK' not in _vim_deb_install.stdout"
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ vim, packages ]
+
+  - name: "[Alpine] Install vim"
+    community.general.apk:
+      name: vim
+      state: present
+    when: ansible_os_family | default('') == "Alpine"
+    tags: [ vim, packages ]
+
+  # --- Remove nano -----------------------------------------------------------
+
+  - name: "[Debian] Remove and purge nano"
+    ansible.builtin.apt:
+      name: nano
+      state: absent
+      purge: true
+      autoremove: true
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ vim, packages ]
+
+  - name: "[Alpine] Remove nano"
+    community.general.apk:
+      name: nano
+      state: absent
+    when: ansible_os_family | default('') == "Alpine"
+    tags: [ vim, packages ]
+
+  # --- Set vim as system default editor -------------------------------------
+
+  # Discover the real vim binary path at runtime - varies by distro/variant
+  # (vim.basic, vim.nox, /usr/bin/vim, etc.)
+  - name: "[Debian] Resolve vim binary path"
+    ansible.builtin.command: which vim
+    register: _vim_which
+    changed_when: false
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ vim, config ]
+
+  - name: "[Debian] Set vim as default editor via update-alternatives"
+    community.general.alternatives:
+      name: editor
+      path: "{{ _vim_which.stdout | trim }}"
+    when:
+      - ansible_os_family | default('') == "Debian"
+      - _vim_which.stdout | default('') | trim | length > 0
+    tags: [ vim, config ]
+
+  - name: "Set EDITOR=vim in /etc/environment"
+    ansible.builtin.lineinfile:
+      path: /etc/environment
+      regexp: '^EDITOR='
+      line: 'EDITOR=vim'
+      create: true
+      owner: root
+      group: root
+      mode: "0644"
+    when: ansible_os_family | default('') != ''
+    tags: [ vim, config ]
+
+  - name: "Set VISUAL=vim in /etc/environment"
+    ansible.builtin.lineinfile:
+      path: /etc/environment
+      regexp: '^VISUAL='
+      line: 'VISUAL=vim'
+      create: true
+      owner: root
+      group: root
+      mode: "0644"
+    when: ansible_os_family | default('') != ''
+    tags: [ vim, config ]
+
+  # --- nano shim ------------------------------------------------------------
+
+  # /usr/local/bin comes before /usr/bin in PATH so this shim wins even if
+  # nano somehow gets reinstalled elsewhere on the system.
+  - name: "Deploy /usr/local/bin/nano vim-superiority shim"
+    ansible.builtin.copy:
+      dest: /usr/local/bin/nano
+      owner: root
+      group: root
+      mode: "0755"
+      content: |
+        #!/bin/sh
+        cat <<'EOF'
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║                                                          ║
+          ║   nano has been removed from this system.               ║
+          ║                                                          ║
+          ║   VIM is the superior editor.  Here is why:             ║
+          ║                                                          ║
+          ║     - Modal editing:  do more with fewer keystrokes      ║
+          ║     - Runs everywhere: servers, containers, the moon     ║
+          ║     - Plugins, macros, splits - nano has none            ║
+          ║     - True professionals use vim                         ║
+          ║                                                          ║
+          ║   Quick start:                                           ║
+          ║     vim <file>   open a file                             ║
+          ║     i            enter insert mode                       ║
+          ║     Esc          return to normal mode                   ║
+          ║     :w           save                                    ║
+          ║     :wq          save and quit                           ║
+          ║     :q!          quit without saving                     ║
+          ║                                                          ║
+          ╚══════════════════════════════════════════════════════════╝
+
+        EOF
+        exit 1
+    when: ansible_os_family | default('') != ''
+    tags: [ vim, shim ]
+
+  - name: "Print vim enforcement summary"
+    ansible.builtin.debug:
+      msg:
+      - "========================================================"
+      - "vim enforced on: {{ inventory_hostname }}"
+      - "  OS:      {{ ansible_distribution }} {{ ansible_distribution_version }}"
+      - "  vim:     installed"
+      - "  nano:    removed + shim at /usr/local/bin/nano"
+      - "  EDITOR:  vim (via /etc/environment)"
+      - "  VISUAL:  vim (via /etc/environment)"
+      - "========================================================"
+    when: ansible_os_family | default('') != ''
+    tags: [ vim, summary ]
+
+
+# =============================================================================
+# PLAY 3 - Set vim as git's system-wide default editor
+# Writes core.editor = vim to /etc/gitconfig so every user on the host gets
+# vim for commit messages, rebase -i, tag -e, etc.
+# =============================================================================
+- name: Set vim as git system-wide default editor
+  hosts: all
+  become: true
+  gather_facts: true
+  ignore_unreachable: true
+
+  tasks:
+
+  - name: "[Debian] Install git"
+    ansible.builtin.apt:
+      name: git
+      state: present
+    when: ansible_os_family | default('') == "Debian"
+    tags: [ git, packages ]
+
+  - name: "[Alpine] Install git"
+    community.general.apk:
+      name: git
+      state: present
+    when: ansible_os_family | default('') == "Alpine"
+    tags: [ git, packages ]
+
+  - name: "Set git system-wide editor to vim"
+    community.general.git_config:
+      name: core.editor
+      value: vim
+      scope: system
+    when: ansible_os_family | default('') != ''
+    tags: [ git, config ]
+
+  # git config --system creates /etc/gitconfig as root:root 0600 - make it
+  # world-readable so non-root users and tools like git-status can read it.
+  - name: "Ensure /etc/gitconfig is world-readable"
+    ansible.builtin.file:
+      path: /etc/gitconfig
+      owner: root
+      group: root
+      mode: "0644"
+    when: ansible_os_family | default('') != ''
+    tags: [ git, config ]
+
+  - name: "Print git editor summary"
+    ansible.builtin.debug:
+      msg:
+      - "========================================================"
+      - "git configured on: {{ inventory_hostname }}"
+      - "  core.editor: vim  (scope: system / /etc/gitconfig)"
+      - "========================================================"
+    when: ansible_os_family | default('') != ''
+    tags: [ git, summary ]
