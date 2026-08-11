@@ -4,17 +4,88 @@
 # update + upgrade. Supports apt (Debian/Ubuntu), apk (Alpine Linux),
 # dnf (RHEL/Fedora/CentOS), and pacman (Arch Linux).
 # Prints per-host upgrade counts and full command output.
+#
+# Preflight (runs before any upgrade task, per host):
+#   1. Ask the Proxmox API whether the guest is even powered on. If it is
+#      stopped/paused, skip it — no point touching a host that is down.
+#   2. If Proxmox says it's running (or the guest couldn't be matched by
+#      name), probe SSH with a short timeout. If that fails, skip the host
+#      instead of letting a full gather_facts failure blow up mid-run.
+# Either check failing marks the host skipped via `meta: end_host`, so a
+# down/unreachable guest never reaches the upgrade tasks below.
+
+- name: Query Proxmox for guest power state
+  hosts: localhost
+  gather_facts: false
+
+  module_defaults:
+    community.proxmox.proxmox_vm_info:
+      api_host: "{{ pm_api_host }}"
+      api_port: "{{ pm_api_port }}"
+      api_user: "{{ api_user }}"
+      api_token_id: "{{ api_token_id }}"
+      api_token_secret: "{{ api_token_secret | default(pm_api_token_secret) }}"
+      validate_certs: "{{ pm_api_validate_certs }}"
+
+  tasks:
+
+  - name: "[preflight] Get all VM/LXC power states from Proxmox API"
+    community.proxmox.proxmox_vm_info:
+      type: all
+      config: none
+    register: _pm_guests
+
+  - name: "[preflight] Build guest-name -> power-state map"
+    ansible.builtin.set_fact:
+      proxmox_guest_status: >-
+        {{ dict(
+             (_pm_guests.proxmox_vms | default([]) | map(attribute='name') | list)
+             | zip(_pm_guests.proxmox_vms | default([]) | map(attribute='status') | list)
+           ) }}
 
 - name: Update and upgrade all LXC containers and VMs
   hosts: all
-  gather_facts: true
-  gather_subset:
-  - pkg_mgr
-  - distribution
+  gather_facts: false
   become: true
   ignore_unreachable: true
 
   tasks:
+
+  #  Preflight — skip hosts that are powered off or unreachable
+
+  - name: "[preflight] Look up this guest's Proxmox power state"
+    ansible.builtin.set_fact:
+      _pm_state: "{{ hostvars['localhost'].proxmox_guest_status[inventory_hostname] | default('unknown') }}"
+
+  - name: "[preflight] SKIPPING — guest is not running in Proxmox ({{ _pm_state }})"
+    ansible.builtin.debug:
+      msg: "{{ inventory_hostname }}: Proxmox reports state '{{ _pm_state }}' — skipping upgrade."
+    when: _pm_state not in ["running", "unknown"]
+
+  - name: "[preflight] End play for this host if Proxmox says it's down"
+    ansible.builtin.meta: end_host
+    when: _pm_state not in ["running", "unknown"]
+
+  - name: "[preflight] Check SSH connectivity before doing anything else"
+    ansible.builtin.wait_for_connection:
+      timeout: 15
+    register: _ssh_check
+    ignore_errors: true
+
+  - name: "[preflight] SKIPPING — SSH connection failed"
+    ansible.builtin.debug:
+      msg: "{{ inventory_hostname }}: SSH connection failed — skipping upgrade (no point upgrading if we can't reach it)."
+    when: _ssh_check is failed
+
+  - name: "[preflight] End play for this host if SSH is unreachable"
+    ansible.builtin.meta: end_host
+    when: _ssh_check is failed
+
+  - name: "[preflight] Gather facts (pkg_mgr, distribution)"
+    ansible.builtin.setup:
+      gather_subset:
+      - pkg_mgr
+      - distribution
 
   #  APT  (Debian / Ubuntu)
 
