@@ -364,6 +364,16 @@ ansible-playbook -i inventory/hosts.ini auto-install-debian.yml
 | `preseed_ssh_wait_timeout` | `2400` (40 min) | Max seconds to wait for SSH |
 | `preseed_ssh_wait_delay` | `30` | Seconds between SSH check attempts |
 
+**Note — what to run next depends on the target:** for a generic server, follow
+with this repo's own `setup-debian-base.yml` below. For a MATE desktop/dev
+workstation (bootstrap user, desktop, dev tools, remote access, performance
+tuning), hand off to the sibling repo
+[ansible-stationctl](https://github.com/BeanGreen247/ansible-stationctl)
+instead — it picks up exactly where `auto-install-debian.yml` leaves off. See
+its own README for the full pipeline; `setup-debian-base.yml` and
+`ansible-stationctl`'s `setup-base-debian.yml` are alternatives, not meant to
+both run against the same host.
+
 ---
 
 ### `setup-debian-base.yml` — Post-Install Baseline
