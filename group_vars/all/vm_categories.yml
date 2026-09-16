@@ -1,0 +1,31 @@
+# vm_categories.yml
+#
+# Overview
+#   Human-assigned category/purpose per VMID, keyed by string vmid so
+#   pve_vm_status.yml can print "what does what" alongside live usage.
+#   Not derived from anything live — update this by hand when a guest's
+#   role changes or a new one is added.
+#
+# Categories used:
+#   remote-desktop | media | game-server | dev | monitoring | backup | infra | misc
+#
+# Credit: Thomas Mozdren
+---
+vm_categories:
+  "100": { category: "media",          purpose: "Jellyfin media server" }
+  "101": { category: "remote-desktop", purpose: "Nebula - Apache Guacamole host + MATE desktop, remote-desktop endpoint" }
+  "102": { category: "dev",            purpose: "Gitea git server (dev.server.wow)" }
+  "103": { category: "game-server",    purpose: "Unreal Tournament 99 server" }
+  "104": { category: "dev",            purpose: "General dev box - Apache, Docker, MySQL, Glances (dev.server.wow)" }
+  "105": { category: "monitoring",     purpose: "LXC - Prometheus" }
+  "106": { category: "media",          purpose: "Navidrome music server + FTP" }
+  "107": { category: "monitoring",     purpose: "LXC - Grafana" }
+  "108": { category: "monitoring",     purpose: "LXC - Proxmox exporter (proxexport)" }
+  "109": { category: "game-server",    purpose: "Minecraft server + RCON/management panel" }
+  "110": { category: "monitoring",     purpose: "LXC - Optiping (ping/uptime monitor)" }
+  "111": { category: "backup",         purpose: "Alpine - MySQL backup target (dev.wow.server)" }
+  "112": { category: "game-server",    purpose: "Game data store for dev.server.wow (stopped/on-demand)" }
+  "113": { category: "game-server",    purpose: "Unreal Tournament 2004 server" }
+  "114": { category: "dev",            purpose: "fleetwm project dev VM (stopped/on-demand)" }
+  "115": { category: "remote-desktop", purpose: "vm-debian-workstation-01 - MATE workstation managed by ansible-stationctl, second remote-desktop endpoint" }
+  "116": { category: "misc",           purpose: "steamIdle - idle Steam client for playtime/cards" }

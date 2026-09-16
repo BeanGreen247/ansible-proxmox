@@ -139,7 +139,9 @@
                  'USED_pct': ((item.maxmem | default(0) | float) > 0)
                               | ternary( (item.mem | default(0) | float / (item.maxmem | float) * 100.0), 0.0),
                  'CPU_pct':  (item.cpu | default(item.cpu) | float * 100.0),
-                 'vCPUs':    (item.maxcpu | default(item.cpus | default(0)))
+                 'vCPUs':    (item.maxcpu | default(item.cpus | default(0))),
+                 'category': (vm_categories[item.vmid|string].category | default('uncategorized')) if (vm_categories is defined) else 'uncategorized',
+                 'purpose':  (vm_categories[item.vmid|string].purpose  | default('')) if (vm_categories is defined) else ''
                })
              ]
         }}
@@ -179,19 +181,21 @@
       running_count: "{{ running_list | length | int }}"
       avg_cpu_running: "{{ ((running_count | int) > 0) | ternary(running_cpu_sum / (running_count | int), 0.0) }}"
     block:
-    - name: VM line (node/vmid  name  status  CPU%  RAMused/RAMmax)
+    - name: VM line (node/vmid  name  status  category  CPU%  RAMused/RAMmax  purpose)
       ansible.builtin.debug:
         msg: >-
           {{
-            "%s/%s  %-32s  %-7s  CPU:%.1f%%  RAM: %.1fGi/%.1fGi (%.1f%%)" | format(
+            "%s/%s  %-32s  %-7s  [%-15s]  CPU:%.1f%%  RAM: %.1fGi/%.1fGi (%.1f%%)  %s" | format(
               item.node|default('-'),
               item.vmid|string,
               (item.name|default('-'))[:32],
               item.status|default('-'),
+              item.category|default('uncategorized'),
               item.CPU_pct|default(0.0),
               (item.mem / (1024.0**3)) | float | round(2),
               (item.maxmem / (1024.0**3)) | float | round(2),
-              item.USED_pct|default(0.0)
+              item.USED_pct|default(0.0),
+              item.purpose|default('')
             )
           }}
       loop: "{{ vm_sorted }}"

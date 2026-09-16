@@ -6,3 +6,8 @@ cis_ufw_extra_ports:
 - { port: "8080", proto: "tcp", comment: "Docker reverse proxy" }
 # CUPS (631) is loopback-only — no UFW rule needed.
 # Tailscale and Cloudflare tunnel handle their own connectivity.
+
+# This host runs Docker (Apache Guacamole stack) — guacd needs to reach VNC/
+# RDP targets on the LAN from its container, which requires IP forwarding.
+# CIS 3.1.1 normally disables it; skip that on this host.
+cis_allow_ip_forward: true

@@ -147,34 +147,52 @@ vms:
 #  # preseed_ip: "192.168.0.x"         # omit for DHCP
 #  # preseed_gateway: "192.168.0.1"    # required if preseed_ip is set
 
-# Preseed auto-install example (active)
-# Uses the ISO built by build-debian-preseed-iso.yml
-# Managed by: auto-install-debian.yml + setup-debian-base.yml
-- name: "ansible-debian-01"
-  vmid: 500
-  # Boot from ISO first, then disk (preseed auto-install)
+# Preseed auto-install example — kept as reference/documentation only.
+# NOTE: create-vm-from-iso-proxmox.yml creates a shell for EVERY entry in this
+# list regardless of preseed_install, so this block must stay commented out
+# (not just preseed_install: false) or re-running that playbook recreates
+# VMID 500 in Proxmox again.
+# - name: "ansible-debian-01"
+#   vmid: 500
+#   # Boot from ISO first, then disk (preseed auto-install)
+#   boot: "order=ide2;scsi0;net0"
+#   bootdisk: scsi0
+#   onboot: false
+#   memory: 1024
+#   cores: 2
+#   net0: "virtio,bridge=vmbr0"
+#   ostype: "l26"
+#   agent: 1
+#   disk_size_gb: 32
+#   storage: "local-lvm"
+#   iso_storage: "local"
+#   iso_path: "iso/"
+#   iso_file: "debian-13-amd64-preseed.iso"
+#   preseed_install: true
+#   preseed_ip: "192.168.0.206"
+#   preseed_gateway: "192.168.0.1"
+#   preseed_hostname: "dev-debian-01"
+
+# ansible-stationctl "remote-workstation" — MATE workstation managed by
+# https://github.com/BeanGreen247/ansible-stationctl after this playbook hands
+# off. Sized to stationctl's workstation_vcpu_budget/workstation_ram_mb_budget
+# (2 vCPU / 4096MB) in ansible-stationctl/group_vars/workstations.yml.
+- name: "vm-debian-workstation-01"
+  vmid: 115
   boot: "order=ide2;scsi0;net0"
   bootdisk: scsi0
-  onboot: false
-  memory: 1024
+  onboot: true
+  memory: 4096
   cores: 2
   net0: "virtio,bridge=vmbr0"
   ostype: "l26"
   agent: 1
-  disk_size_gb: 32
+  disk_size_gb: 48
   storage: "local-lvm"
   iso_storage: "local"
   iso_path: "iso/"
-  # Reference the preseed ISO built by build-debian-preseed-iso.yml
   iso_file: "debian-13-amd64-preseed.iso"
-  # Preseed install flags
-  # Set to true to include this VM in auto-install-debian.yml
   preseed_install: true
-  # ip_address is OPTIONAL - if omitted, the IP is auto-discovered via
-  # the qemu-guest-agent after install (recommended).
-  # Set it if you have a known static IP or DHCP reservation.
-  # ip_address: "192.168.0.50"
-  # Optional: static IP injected into the preseed (uncomment to use)
-  preseed_ip: "192.168.0.206"
+  preseed_ip: "192.168.0.118"
   preseed_gateway: "192.168.0.1"
-  preseed_hostname: "dev-debian-01"
+  preseed_hostname: "workstation-01"

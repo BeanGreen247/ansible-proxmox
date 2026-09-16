@@ -360,6 +360,11 @@
   # All tasks use ignore_errors: true — unprivileged LXC containers may
   # reject sysctl writes that modify namespace-shared kernel parameters.
 
+  # Docker (and any other bridging/NAT workload) needs ip_forward=1 for
+  # containers to reach anything outside their own bridge network — set
+  # cis_allow_ip_forward: true in that host's host_vars to skip this hard
+  # disable (see host_vars/vm-debian-remote-desktop/main.yml for the guac
+  # host, which runs Docker).
   - name: "[CIS 3.1.1] Disable IP packet forwarding"
     ansible.posix.sysctl:
       name: "{{ item }}"
@@ -371,6 +376,7 @@
     - net.ipv4.ip_forward
     - net.ipv6.conf.all.forwarding
     ignore_errors: true
+    when: not (cis_allow_ip_forward | default(false) | bool)
     tags: [ cis3 ]
 
   - name: "[CIS 3.2.2] Disable send_redirects"
