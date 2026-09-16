@@ -1,0 +1,16 @@
+# Managed by Ansible — deploy-guacamole-wol.yml. Do not edit by hand;
+# changes will be overwritten on the next playbook run.
+[Unit]
+Description=Wake-on-LAN / ARP-trigger listener that starts Proxmox VMs on demand
+After=network.target pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wol-vm-listener.py
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

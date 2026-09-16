@@ -1,0 +1,18 @@
+# group_vars/all/guacamole_wol.yml
+# Config for deploy-guacamole-wol.yml — see that playbook's header for the
+# full writeup of why this exists and how it works.
+
+# Inventory hostname of the box running the Apache Guacamole docker-compose
+# stack (guacd + guacamole + mysql). Must be a host in [vms] or [lxcs].
+guacamole_host: vm-debian-remote-desktop
+
+# Path (on guacamole_host) to the docker-compose.yml running guacd.
+guacamole_compose_path: /home/kenny/.docker_compose_apache_guacamole/docker-compose.yml
+
+# VMs that Guacamole should be able to wake from stopped. Each entry needs
+# vmid (used to look up the VM's real NIC MAC via `qm config`) and ip (the
+# VM's static/DHCP-reserved LAN IP — this is what guac connections point at,
+# and what the ARP trigger below watches for).
+guacamole_wol_targets:
+  - vmid: 115
+    ip: "192.168.0.215"   # vm-debian-workstation-01

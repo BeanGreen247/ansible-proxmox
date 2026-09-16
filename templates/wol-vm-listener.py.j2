@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+# Managed by Ansible — deploy-guacamole-wol.yml. Do not edit by hand;
+# changes will be overwritten on the next playbook run.
+#
+# Starts Proxmox VMs on either a real WoL magic packet, or an ARP request
+# for a known-stopped VM's IP.
+#
+# Why the ARP trigger exists: Apache Guacamole (guacd) has a documented
+# client-side Wake-on-LAN feature (wol-send-packet/wol-mac-addr/etc. connection
+# parameters), but in guacd 1.6.0 it was found to never actually send the
+# magic packet for the VNC protocol plugin (confirmed via strace -e
+# trace=network during a live connection attempt — no UDP socket, no sendto,
+# ever, despite the DEBUG log line claiming "Sending Wake-on-LAN packet").
+# A TCP connect() to a powered-off host never puts a frame on the wire
+# either (ARP for the target never resolves, so the kernel never has a MAC
+# to address the frame to). What DOES reliably hit the wire is the ARP
+# *request* itself ("who has X, tell Y") — that's a broadcast, sent once per
+# connect retry, regardless of whether the target answers. Watching for that
+# is a reliable, protocol-and-bug-agnostic "something is trying to reach
+# this VM" signal.
+import socket
+import struct
+import subprocess
+import syslog
+import threading
+
+# MAC address (uppercase, colon-separated) -> Proxmox VMID
+MAC_TO_VMID = {
+{% for t in _wol_target_details %}
+    "{{ t.mac | upper }}": {{ t.vmid }},  # {{ t.name }}
+{% endfor %}
+}
+
+# IP being ARP'd for -> Proxmox VMID
+ARP_TRIGGER_TO_VMID = {
+{% for t in _wol_target_details %}
+    "{{ t.ip }}": {{ t.vmid }},  # {{ t.name }}
+{% endfor %}
+}
+
+WOL_LISTEN_PORT = {{ guacamole_wol_udp_port | default(9) }}
+
+
+def vm_is_running(vmid: int) -> bool:
+    out = subprocess.run(
+        ["qm", "status", str(vmid)], capture_output=True, text=True
+    )
+    return "status: running" in out.stdout
+
+
+def start_vm(vmid: int, reason: str):
+    if vm_is_running(vmid):
+        return
+    syslog.syslog(f"starting VM {vmid} ({reason})")
+    subprocess.run(["qm", "start", str(vmid)], check=False)
+
+
+def normalize_mac(raw: bytes) -> str:
+    return ":".join(f"{b:02X}" for b in raw)
+
+
+def extract_wol_mac(packet: bytes):
+    if len(packet) < 102 or packet[0:6] != b"\xff" * 6:
+        return None
+    mac = packet[6:12]
+    for i in range(1, 16):
+        chunk = packet[6 + i * 6: 12 + i * 6]
+        if chunk != mac:
+            return None
+    return normalize_mac(mac)
+
+
+def wol_listener():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", WOL_LISTEN_PORT))
+    syslog.syslog(f"WoL listener up on UDP {WOL_LISTEN_PORT}")
+    while True:
+        data, addr = sock.recvfrom(1024)
+        mac = extract_wol_mac(data)
+        if mac is None:
+            continue
+        vmid = MAC_TO_VMID.get(mac)
+        if vmid is None:
+            continue
+        start_vm(vmid, f"magic packet for {mac} from {addr[0]}")
+
+
+def arp_trigger_listener():
+    raw = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+    syslog.syslog(f"ARP trigger listener up, watching {ARP_TRIGGER_TO_VMID}")
+    while True:
+        packet, _ = raw.recvfrom(65535)
+        if len(packet) < 42:
+            continue
+        eth_type = struct.unpack("!H", packet[12:14])[0]
+        if eth_type != 0x0806:
+            continue
+        arp = packet[14:42]
+        oper = struct.unpack("!H", arp[6:8])[0]
+        if oper != 1:  # request
+            continue
+        target_ip = socket.inet_ntoa(arp[24:28])
+        vmid = ARP_TRIGGER_TO_VMID.get(target_ip)
+        if vmid is None:
+            continue
+        start_vm(vmid, f"ARP request for {target_ip}")
+
+
+def main():
+    syslog.openlog("wol-vm-listener")
+    t1 = threading.Thread(target=wol_listener, daemon=True)
+    t2 = threading.Thread(target=arp_trigger_listener, daemon=True)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,262 @@
+---
+# deploy-guacamole-wol.yml
+# Makes "connect via Guacamole to a powered-off VM" actually wake it.
+#
+# Background — why this exists:
+#   Apache Guacamole (guacd) ships a client-side Wake-on-LAN feature
+#   (wol-send-packet / wol-mac-addr / wol-broadcast-addr / wol-udp-port /
+#   wol-wait-time connection parameters). On this stack it turned out to be
+#   broken two different ways, discovered the hard way on
+#   vm-debian-workstation-01 (vmid 115) on 2026-09-16:
+#     1. guacd normally runs in Docker's default bridge network. A container
+#        there physically cannot put a broadcast frame on the LAN (no ARP
+#        route out for a NAT-bridged veth to a broadcast destination) — so
+#        even a correctly-configured WoL send never reaches the wire.
+#     2. Even after fixing that (host networking), a live strace
+#        (-e trace=network) during a real connection attempt showed guacd
+#        1.6.0's VNC plugin never actually opens a UDP socket or calls
+#        sendto() for the magic packet at all, despite logging "Sending
+#        Wake-on-LAN packet, and pausing for 120 seconds." at DEBUG level.
+#        This looks like a genuine upstream bug, not a config mistake.
+#
+#   The fix that actually works, implemented by this playbook:
+#     - guacd gets real host networking, so if guacd's WoL logic is ever
+#       fixed upstream, an actual magic packet CAN escape onto the LAN.
+#     - A small listener service on the Proxmox host itself catches the
+#       thing that DOES reliably escape onto the wire when guacd tries (and
+#       fails) to connect to a powered-off VM: the ARP request Linux
+#       broadcasts once per connect retry ("who has 192.168.0.215, tell
+#       192.168.0.245") — ARP requests don't need the target to be up to be
+#       sent. On seeing one for a known VM IP, it runs `qm start`. It also
+#       still listens for real magic packets on UDP/9, in case guacd's WoL
+#       gets fixed upstream later or something else sends one directly.
+#     - `autoretry` is left as a manual step (see below) on the Guacamole
+#       connection so guacd keeps retrying the VNC/RDP connect for long
+#       enough to cover the VM's boot time instead of giving up after ~6s.
+#
+# What this playbook does:
+#   Play 1 (proxmox-bms): deploys wol-vm-listener.py + its systemd service,
+#     built from guacamole_wol_targets (group_vars/all/guacamole_wol.yml).
+#     MACs are looked up live via `qm config`, so you only ever need to
+#     maintain {vmid, ip} pairs, not MACs.
+#   Play 2 (guacamole_host): idempotently patches the guacd service in its
+#     docker-compose.yml to use network_mode: host, and repoints
+#     GUACD_HOSTNAME at the docker bridge gateway the guacamole webapp
+#     container needs to reach it through (auto-discovered — no host-specific
+#     hardcoding). Recreates guacd/guacamole only if something changed.
+#
+# Manual follow-up (not automated — needs an interactive TOTP login to the
+# Guacamole REST API, so it doesn't fit an idempotent playbook run):
+#   On each connection you want this for, set (Settings > Connections >
+#   <connection> > Parameters):
+#     autoretry: 60   (or higher — matches how long the VM takes to boot)
+#   The existing wol-* parameters can stay as-is; they're harmless even
+#   though guacd doesn't currently act on them.
+#
+# Prerequisites:
+#   - proxmox-bms and guacamole_host already reachable via inventory
+#     (ansibleuser, key auth — see inventory/hosts.ini).
+#   - guacamole_host already has docker + docker compose and a running
+#     guacd/guacamole/mysql stack at guacamole_compose_path.
+#
+# Variables (group_vars/all/guacamole_wol.yml):
+#   guacamole_host           inventory hostname of the docker-compose host
+#   guacamole_compose_path   path to its docker-compose.yml
+#   guacamole_wol_targets    list of {vmid, ip} VMs to enable this for
+#   guacamole_wol_udp_port   WoL listen port (default: 9)
+#
+# Usage:
+#   ansible-playbook deploy-guacamole-wol.yml
+#   ansible-playbook deploy-guacamole-wol.yml --tags listener   # proxmox-bms side only
+#   ansible-playbook deploy-guacamole-wol.yml --tags guacd      # guacamole_host side only
+#   ansible-playbook deploy-guacamole-wol.yml --tags test       # verify only, no changes
+#
+# Re-run at any time — every task here is idempotent.
+
+- name: Deploy Proxmox-side WoL/ARP-trigger listener
+  hosts: proxmox-bms
+  become: true
+  gather_facts: false
+  tags: [ listener ]
+
+  tasks:
+
+  - name: "[wol] Show WoL targets for this run"
+    ansible.builtin.debug:
+      msg: "{{ guacamole_wol_targets }}"
+    tags: [ always ]
+
+  - name: "[wol] Look up each target VM's net0 MAC address"
+    ansible.builtin.command: "qm config {{ item.vmid }}"
+    register: _qm_config
+    changed_when: false
+    loop: "{{ guacamole_wol_targets }}"
+    loop_control:
+      label: "vmid {{ item.vmid }}"
+
+  - name: "[wol] Build target list with resolved MACs"
+    ansible.builtin.set_fact:
+      _wol_target_details: >-
+        {{ _wol_target_details | default([]) + [ {
+          'vmid': item.item.vmid,
+          'ip': item.item.ip,
+          'name': (vm_categories[item.item.vmid | string].purpose
+                   if vm_categories is defined and (item.item.vmid | string) in vm_categories
+                   else 'vmid ' ~ item.item.vmid),
+          'mac': (item.stdout_lines
+                  | select('match', '^net\\d+:')
+                  | list | first
+                  | regex_search('=([0-9A-Fa-f:]{17})', '\\1'))[0],
+        } ] }}
+    loop: "{{ _qm_config.results }}"
+    loop_control:
+      label: "vmid {{ item.item.vmid }}"
+
+  - name: "[wol] Fail loudly if a target VM has no net0 MAC"
+    ansible.builtin.assert:
+      that: item.mac is not none and item.mac | length > 0
+      fail_msg: "Could not find a net0 MAC for vmid {{ item.vmid }} — check `qm config {{ item.vmid }}` on {{ inventory_hostname }}."
+    loop: "{{ _wol_target_details }}"
+    loop_control:
+      label: "vmid {{ item.vmid }}"
+
+  - name: "[wol] Deploy wol-vm-listener.py"
+    ansible.builtin.template:
+      src: templates/wol-vm-listener.py.j2
+      dest: /usr/local/bin/wol-vm-listener.py
+      owner: root
+      group: root
+      mode: "0755"
+    notify: restart wol-vm-listener
+
+  - name: "[wol] Deploy wol-vm-listener systemd unit"
+    ansible.builtin.template:
+      src: templates/wol-vm-listener.service.j2
+      dest: /etc/systemd/system/wol-vm-listener.service
+      owner: root
+      group: root
+      mode: "0644"
+    register: _wol_unit
+    notify: restart wol-vm-listener
+
+  - name: "[wol] Reload systemd if the unit file changed"
+    ansible.builtin.systemd:
+      daemon_reload: true
+    when: _wol_unit.changed
+
+  - name: "[wol] Ensure wol-vm-listener is enabled and running"
+    ansible.builtin.systemd:
+      name: wol-vm-listener
+      enabled: true
+      state: started
+
+  handlers:
+
+  - name: restart wol-vm-listener
+    ansible.builtin.systemd:
+      name: wol-vm-listener
+      daemon_reload: true
+      state: restarted
+
+
+- name: Fix guacd networking so it can reach the LAN (and, one day, send WoL)
+  hosts: "{{ guacamole_host | default('vm-debian-remote-desktop') }}"
+  become: true
+  gather_facts: false
+  tags: [ guacd ]
+
+  tasks:
+
+  - name: "[guacd] Check compose file exists"
+    ansible.builtin.stat:
+      path: "{{ guacamole_compose_path }}"
+    register: _compose_stat
+
+  - name: "[guacd] Fail if compose file is missing"
+    ansible.builtin.assert:
+      that: _compose_stat.stat.exists
+      fail_msg: >-
+        {{ guacamole_compose_path }} not found on {{ inventory_hostname }}.
+        Set guacamole_compose_path in group_vars/all/guacamole_wol.yml to
+        the real path of your guacd/guacamole/mysql docker-compose.yml.
+
+  - name: "[guacd] Back up docker-compose.yml before editing"
+    ansible.builtin.copy:
+      src: "{{ guacamole_compose_path }}"
+      dest: "{{ guacamole_compose_path }}.bak-ansible-wol"
+      remote_src: true
+      force: false
+
+  - name: "[guacd] Give guacd real host networking (needed to broadcast on the LAN at all)"
+    ansible.builtin.replace:
+      path: "{{ guacamole_compose_path }}"
+      regexp: '(command: \["guacd","-f"\]\n)    networks:\n      - [^\n]+\n'
+      replace: '\1    network_mode: host\n'
+    register: _patch_network_mode
+
+  - name: "[guacd] Inspect the guacamole webapp container's docker network"
+    ansible.builtin.command: docker inspect guacamole
+    register: _guacamole_inspect
+    changed_when: false
+    failed_when: false
+
+  - name: "[guacd] Determine the docker bridge gateway guacd is reachable at"
+    ansible.builtin.set_fact:
+      guacd_bridge_gateway: >-
+        {{ ((_guacamole_inspect.stdout | from_json | first)
+             .NetworkSettings.Networks.values() | list | first).Gateway }}
+    when: _guacamole_inspect.rc == 0
+
+  - name: "[guacd] Fail if the bridge gateway couldn't be determined"
+    ansible.builtin.assert:
+      that: guacd_bridge_gateway is defined and guacd_bridge_gateway | length > 0
+      fail_msg: >-
+        Could not determine the guacamole container's docker bridge gateway
+        on {{ inventory_hostname }} (is the "guacamole" container running?).
+        Set it manually and re-run with -e guacd_bridge_gateway=<ip>.
+    when: guacd_bridge_gateway | default('') | length == 0
+
+  - name: "[guacd] Point GUACD_HOSTNAME at the bridge gateway (its docker DNS name stops resolving once it leaves the bridge network)"
+    ansible.builtin.replace:
+      path: "{{ guacamole_compose_path }}"
+      regexp: '^(\s*GUACD_HOSTNAME:\s*).*$'
+      replace: '\1{{ guacd_bridge_gateway }}'
+    register: _patch_hostname
+
+  - name: "[guacd] Recreate guacd + guacamole containers if anything changed"
+    ansible.builtin.shell: |
+      set -e
+      cd "$(dirname '{{ guacamole_compose_path }}')"
+      docker compose up -d --force-recreate guacd guacamole
+    args:
+      executable: /bin/bash
+    when: _patch_network_mode.changed or _patch_hostname.changed
+
+  - name: "[guacd] Wait for guacd to accept connections again"
+    ansible.builtin.wait_for:
+      host: 127.0.0.1
+      port: 4822
+      timeout: 30
+    when: _patch_network_mode.changed or _patch_hostname.changed
+
+  - name: "[guacd] Confirm guacd is running with host networking"
+    ansible.builtin.command: docker inspect guacd --format '{{ '{{' }}.HostConfig.NetworkMode{{ '}}' }}'
+    register: _guacd_netmode
+    changed_when: false
+    tags: [ test ]
+
+  - name: "[guacd] Report guacd network mode"
+    ansible.builtin.assert:
+      that: _guacd_netmode.stdout | trim == 'host'
+      fail_msg: "guacd is not running with host networking — WoL/ARP triggers won't see its connect attempts."
+      success_msg: "guacd network mode: {{ _guacd_netmode.stdout | trim }} (OK)"
+    tags: [ test ]
+
+  - name: "[guacd] Reminder: set autoretry on the Guacamole connection(s)"
+    ansible.builtin.debug:
+      msg: >-
+        Manual step (needs an interactive TOTP login, not automatable here):
+        in the Guacamole web UI, set the "autoretry" parameter (e.g. 60) on
+        every connection pointing at a VM in guacamole_wol_targets, so guacd
+        keeps retrying long enough to cover the VM's boot time.
+    tags: [ always ]
