@@ -200,6 +200,6 @@ vms:
   iso_path: "iso/"
   iso_file: "debian-13-amd64-preseed.iso"
   preseed_install: true
-  preseed_ip: "192.168.0.118"
+  preseed_ip: "192.168.0.162"
   preseed_gateway: "192.168.0.1"
   preseed_hostname: "workstation-01"
