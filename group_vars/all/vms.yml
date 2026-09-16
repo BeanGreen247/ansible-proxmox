@@ -175,8 +175,25 @@ vms:
 
 # ansible-stationctl "remote-workstation" — MATE workstation managed by
 # https://github.com/BeanGreen247/ansible-stationctl after this playbook hands
-# off. Sized to stationctl's workstation_vcpu_budget/workstation_ram_mb_budget
-# (2 vCPU / 4096MB) in ansible-stationctl/group_vars/workstations.yml.
+# off. This is the ONLY place that sets its CPU/RAM — stationctl no longer
+# has its own copy of these numbers (see its group_vars/workstations.yml).
+# To resize the VM: change memory/cores below, then run:
+#   ansible-playbook -i inventory/hosts.ini create-vm-from-iso-proxmox.yml --tags updateVMs
+# (updateVMs only touches memory/cores/sockets/cpu/scsihw/net/ostype/agent/onboot —
+# it does not touch the disk or CD-ROM.)
+#
+# disk_size_gb must stay DEFINED (not commented out): unlike the iso_* fields
+# below, it has a fallback (vm_defaults.size_gb: 20) and the createDisks task
+# (proxmox_disk, state: present) applies that fallback with no shrink guard —
+# commenting it out would make a re-run silently attempt 20G against this
+# VM's real 150G disk instead of leaving it alone. Confirmed via SSH into the
+# guest (lsblk/df -h) that the real disk is still 150G, so the value below is
+# accurate and a re-run of createDisks/updateVMs stays a no-op.
+#
+# iso_storage/iso_path/iso_file are removed entirely (not just commented out):
+# the preseed CD-ROM (ide2) was detached after install and this VM currently
+# has no CD-ROM drive at all, so there's no "current" ISO config left to match.
+# Re-add all three (with values) only if you deliberately attach a CD-ROM again.
 - name: "vm-debian-workstation-01"
   vmid: 115
   boot: "order=ide2;scsi0;net0"
@@ -195,10 +212,7 @@ vms:
   # preseed layout below matters just as much as the size.)
   disk_size_gb: 150
   cpu: "host"
-  storage: "local-lvm"
-  iso_storage: "local"
-  iso_path: "iso/"
-  iso_file: "debian-13-amd64-preseed.iso"
+  storage: "vm-8tb-hdd0"
   preseed_install: true
   preseed_ip: "192.168.0.162"
   preseed_gateway: "192.168.0.1"
