@@ -78,7 +78,14 @@ d-i partman-partitioning/confirm_write_new_label boolean true
 d-i partman/choose_partition select finish
 d-i partman/confirm boolean true
 d-i partman/confirm_nooverwrite boolean true
-d-i partman-basicfilesystems/no_swap boolean false
+# true = no separate swap partition — genuinely single-partition, matching
+# the comment above. Swap is handled entirely by zram (primary) + a
+# swapfile (overflow), set up post-install by ansible-stationctl's
+# setup-performance-tuning.yml — not by the installer. A swap *partition*
+# sits at a fixed size chosen at install time and, worse, blocks growing
+# the root partition later without deleting it first (found the hard way
+# on VMID 115: had to swapoff, delete the swap partition, then grow root).
+d-i partman-basicfilesystems/no_swap boolean true
 
 #### -----------------------------------------------------------------------
 #### Account setup

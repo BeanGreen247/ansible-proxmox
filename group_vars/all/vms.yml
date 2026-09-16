@@ -187,7 +187,14 @@ vms:
   net0: "virtio,bridge=vmbr0"
   ostype: "l26"
   agent: 1
-  disk_size_gb: 48
+  # 150G: room for Docker image growth, IDEs, and future game-port build
+  # trees on top of the ~13GB of dev tooling/projects that live here day
+  # one. local-lvm thin pool has 788GB free, so this costs nothing until
+  # actually used. (First real build used 48G and had to be grown live —
+  # see setup-base-debian.yml's swapfile-vs-partition note for why the
+  # preseed layout below matters just as much as the size.)
+  disk_size_gb: 150
+  cpu: "host"
   storage: "local-lvm"
   iso_storage: "local"
   iso_path: "iso/"

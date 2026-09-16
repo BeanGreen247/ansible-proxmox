@@ -76,6 +76,15 @@
       memory: 1024
       cores: 1
       sockets: 1
+      # Default to full host CPU passthrough (AVX2/BMI2/AES-NI etc.) rather
+      # than Proxmox's conservative "kvm64" fallback. Modern JS runtimes
+      # (Node/Bun/V8) have SIMD-optimized hot paths that silently fall back
+      # to much slower generic code without these — found the hard way when
+      # `claude` install/launch took 15-20+ min of pure CPU-bound work on a
+      # kvm64 guest (VMID 115) vs seconds on this same host's other guests
+      # that already had cpu: host. Single-node homelab, no live-migration
+      # need, so there's no downside to passthrough here.
+      cpu: "host"
       size_gb: 20
       net0: "virtio,bridge=vmbr0"
       storage: "local-lvm"
@@ -106,6 +115,7 @@
       memory: "{{ item.memory | default(vm_defaults.memory) }}"
       cores: "{{ item.cores | default(vm_defaults.cores) }}"
       sockets: "{{ item.sockets | default(vm_defaults.sockets) }}"
+      cpu: "{{ item.cpu | default(vm_defaults.cpu) }}"
       scsihw: "{{ item.scsihw | default(vm_defaults.scsihw) }}"
       net:
         net0: "{{ item.net0 | default(vm_defaults.net0) }}"
@@ -299,6 +309,7 @@
       memory: "{{ item.memory | default(vm_defaults.memory) }}"
       cores: "{{ item.cores | default(vm_defaults.cores) }}"
       sockets: "{{ item.sockets | default(vm_defaults.sockets) }}"
+      cpu: "{{ item.cpu | default(vm_defaults.cpu) }}"
       scsihw: "{{ item.scsihw | default(vm_defaults.scsihw) }}"
       net:
         net0: "{{ item.net0 }}"
