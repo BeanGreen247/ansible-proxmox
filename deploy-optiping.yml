@@ -50,6 +50,10 @@
   become: true
   gather_facts: true
 
+  # Never let git block on an interactive credential prompt — fail fast instead.
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+
   vars:
     optiping_install_dir: /opt/optiping
     optiping_staging_dir: /root/OptiPing
@@ -87,12 +91,33 @@
     tags: [ install ]
 
   # 2) Clone / update repo into staging dir, then sync to install dir
+
+  # Guard against a stale staging clone from an earlier run — a rewritten remote
+  # URL or leftover credential helper makes `git fetch` prompt for a username,
+  # which fails non-interactively with "could not read Username for github.com".
+  - name: "[optiping] Check existing staging clone remote"
+    ansible.builtin.command:
+      cmd: git -C "{{ optiping_staging_dir }}" config --get remote.origin.url
+    register: _optiping_origin
+    changed_when: false
+    failed_when: false
+    tags: [ install ]
+
+  - name: "[optiping] Remove stale staging clone (remote URL mismatch)"
+    ansible.builtin.file:
+      path: "{{ optiping_staging_dir }}"
+      state: absent
+    when:
+    - _optiping_origin.rc == 0
+    - _optiping_origin.stdout | trim != _optiping_repo_url
+    tags: [ install ]
+
   - name: "[optiping] Clone or update OptiPing staging repo"
     ansible.builtin.git:
       repo: "{{ _optiping_repo_url }}"
       dest: "{{ optiping_staging_dir }}"
-      version: "{{ optiping_repo_version | default('main') }}"
-      force: false
+      version: "{{ _optiping_repo_version }}"
+      force: true
     register: _optiping_git
     tags: [ install ]
 
