@@ -4,6 +4,8 @@
 
 ![Ansible](https://img.shields.io/badge/ansible-%231A1918.svg?style=for-the-badge&logo=ansible&logoColor=white) ![Proxmox](https://img.shields.io/badge/proxmox-proxmox?style=for-the-badge&logo=proxmox&logoColor=%23E57000&labelColor=%232b2a33&color=%232b2a33) ![Debian](https://img.shields.io/badge/Debian-D70A53?style=for-the-badge&logo=debian&logoColor=white) ![MIT License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)
 
+> **In a hurry?** See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for "how do I run this properly, how do I test a change, which file do I edit for X" — this file is the full reference.
+
 ---
 
 ## Table of Contents
@@ -779,6 +781,8 @@ Each host line:
 ```ini
 hostname  ansible_host=192.168.0.x  ansible_user=ansible  ansible_ssh_private_key_file=~/.ssh/id_rsa
 ```
+
+See [`docs/INVENTORY-CONSOLIDATION.md`](docs/INVENTORY-CONSOLIDATION.md) for an open (undecided) proposal to replace this static file — here and in the sibling `ansible-stationctl` repo — with a live Tailscale-based lookup.
 
 ---
 
