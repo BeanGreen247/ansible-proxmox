@@ -152,7 +152,7 @@
   #   2) Eject the ISO and fix boot order while the VM is safely off
   #   3) Power it on so it boots from disk (no reinstall loop)
   #   4) Poll the guest agent for the IP of the running installed system
-  - name: "Wait for install to complete - VM halts when done (up to {{ (preseed_ssh_wait_timeout | int // 60) }} min)"
+  - name: "Wait for install to complete (VM halts when done), timeout minutes: {{ (preseed_ssh_wait_timeout | int // 60) }}"
     ansible.builtin.uri:
       url: "https://{{ pm_api_host }}:8006/api2/json/nodes/{{ pm_node }}/qemu/{{ item.vmid }}/status/current"
       headers:
@@ -218,7 +218,7 @@
       label: "{{ item.name }}"
     tags: [ preseed, wait, discover ]
 
-  - name: "Wait {{ preseed_boot_wait_seconds }}s for the installed system to boot"
+  - name: "Wait for the installed system to boot, seconds: {{ preseed_boot_wait_seconds }}"
     ansible.builtin.pause:
       seconds: "{{ preseed_boot_wait_seconds }}"
     when: preseed_vms | rejectattr('ip_address', 'defined') | list | length > 0

@@ -1,0 +1,25 @@
+# "basic" catches real-risk classes (syntax/load failures, deprecated
+# modules, broken jinja, no-jinja-when, etc.) without demanding this
+# already-working repo be rewritten to the opinionated "production"
+# style profile in one unrelated pass. Mirrors ansible-stationctl's
+# .ansible-lint. Tighten later as a deliberate cleanup.
+profile: basic
+
+exclude_paths:
+  - collections/
+  - .ansible/
+  - .github/
+
+# jinja[invalid]: ansible-lint's static Jinja renderer can't fully resolve
+# these chained filter expressions (division after nested |float/|int
+# casts in pve_vm_status.yml) and reports a false positive — verified by
+# actually running pve_vm_status.yml against starhaven (2026-09-19,
+# ok=19 failed=0, no template error) that this executes cleanly for real.
+#
+# command-instead-of-module: deliberate raw apt-get/curl usage in
+# update_upgrade.yml (apt-get --simulate for a dry-run list) and
+# wazuh_agent_deploy.yml (curl with options not cleanly expressible via
+# get_url/apt module) — not an oversight.
+skip_list:
+  - jinja[invalid]
+  - command-instead-of-module

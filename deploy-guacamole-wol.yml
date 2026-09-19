@@ -127,7 +127,7 @@
       owner: root
       group: root
       mode: "0755"
-    notify: restart wol-vm-listener
+    notify: Restart wol-vm-listener
 
   - name: "[wol] Deploy wol-vm-listener systemd unit"
     ansible.builtin.template:
@@ -137,7 +137,7 @@
       group: root
       mode: "0644"
     register: _wol_unit
-    notify: restart wol-vm-listener
+    notify: Restart wol-vm-listener
 
   - name: "[wol] Reload systemd if the unit file changed"
     ansible.builtin.systemd:
@@ -152,7 +152,7 @@
 
   handlers:
 
-  - name: restart wol-vm-listener
+  - name: Restart wol-vm-listener
     ansible.builtin.systemd:
       name: wol-vm-listener
       daemon_reload: true

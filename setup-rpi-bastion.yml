@@ -412,7 +412,7 @@
   # UFW — expose SSH bastion port; harden Cockpit to LAN + Tailscale only
   # ════════════════════════════════════════════════════════════════════════
 
-  - name: "UFW: allow SSH on port {{ cis_bastion_ssh_port }} BEFORE enabling"
+  - name: "UFW: allow SSH BEFORE enabling, port: {{ cis_bastion_ssh_port }}"
     community.general.ufw:
       rule: allow
       port: "{{ cis_bastion_ssh_port | string }}"
