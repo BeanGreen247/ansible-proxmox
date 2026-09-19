@@ -199,7 +199,14 @@ vms:
   boot: "order=ide2;scsi0;net0"
   bootdisk: scsi0
   onboot: true
-  memory: 4096
+  # Bumped 4096 -> 8192 on 2026-09-19: starhaven had ~29GB available RAM
+  # live (62GB total, 8 running guests summing to ~26GB configured) at the
+  # time, plenty of headroom for this. NOTE: this only updates the stored
+  # VM config via the API (community.proxmox.proxmox_kvm, update: true) —
+  # it does NOT hot-add RAM to the already-running guest (no memory
+  # hotplug device configured on this VM). The extra 4GB only actually
+  # applies after vmid 115 is rebooted.
+  memory: 8192
   cores: 2
   net0: "virtio,bridge=vmbr0"
   ostype: "l26"
