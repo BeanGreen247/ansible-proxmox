@@ -784,6 +784,8 @@ hostname  ansible_host=192.168.0.x  ansible_user=ansible  ansible_ssh_private_ke
 
 See [`docs/INVENTORY-CONSOLIDATION.md`](docs/INVENTORY-CONSOLIDATION.md) for an open (undecided) proposal to replace this static file — here and in the sibling `ansible-stationctl` repo — with a live Tailscale-based lookup.
 
+See [`docs/BRAINSTORM-COMPARISON.md`](docs/BRAINSTORM-COMPARISON.md) for a research-backed comparison against comparable public projects (community-scripts/ProxmoxVE, chezmoi, home-manager, etc.) and ranked ideas for what would make this setup distinctive — prep work for a future website writeup, not yet acted on.
+
 ---
 
 ## Preseed Template
