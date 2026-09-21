@@ -3,4 +3,15 @@
 
 cis_ufw_extra_ports:
 - { port: "9100", proto: "tcp", comment: "node_exporter" }
+- { port: "9100", proto: "udp", comment: "node_exporter — already manually allowed live 2026-09-21" }
 - { port: "9221", proto: "tcp", comment: "Proxmox exporter" }
+- { port: "9221", proto: "udp", comment: "Proxmox exporter — already manually allowed live 2026-09-21" }
+# None of the three below are currently listening to anything on this host —
+# already manually allowed live 2026-09-21 regardless, purpose unconfirmed.
+# Kept for compatibility per policy: allowed live -> declared here.
+- { port: "20", proto: "tcp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "20", proto: "udp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "21", proto: "tcp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "21", proto: "udp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "9090", proto: "tcp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "9090", proto: "udp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }

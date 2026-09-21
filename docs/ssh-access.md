@@ -8,7 +8,7 @@ access to web UIs (Grafana, Proxmox, Jellyfin) with near-zero bandwidth overhead
 
 ## Problem: why CIS hardening locked you out
 
-`cis-harden.yml` applies:
+`security-harden.yml` applies:
 
 - `AllowUsers ansibleuser cartman` — only those two users may SSH in
 - `PasswordAuthentication no` — key-only; your key must be in `authorized_keys`

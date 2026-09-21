@@ -4,3 +4,17 @@
 cis_ufw_extra_ports:
 - { port: "8075", proto: "tcp", comment: "UT2004 game server" }
 - { port: "8075", proto: "udp", comment: "UT2004 game server (UDP)" }
+# The ports below were already manually `ufw allow`-ed on this host (not via
+# Ansible) and confirmed live via `ss` 2026-09-21 — LinuxGSM's UT2004 engine
+# (ucc-bin) actually binds several more ports than the primary game port
+# above. Declaring them here so a rebuild reproduces the working firewall
+# instead of only opening 8075.
+- { port: "7777:7787", proto: "udp", comment: "UT2004 engine ports (ucc-bin)" }
+- { port: "7777", proto: "tcp", comment: "UT2004 engine port (ucc-bin)" }
+- { port: "7778", proto: "tcp", comment: "UT2004 engine port (ucc-bin)" }
+- { port: "7787", proto: "tcp", comment: "UT2004 engine port (ucc-bin)" }
+- { port: "10777", proto: "tcp", comment: "UT2004 engine port (ucc-bin, confirmed live)" }
+- { port: "10777", proto: "udp", comment: "UT2004 engine port (ucc-bin, confirmed live)" }
+- { port: "28902", proto: "tcp", comment: "UT2004 GameSpy/master-server port" }
+- { port: "443", proto: "tcp", comment: "UT2004 — purpose unconfirmed, already open live; verify before removing" }
+- { port: "443", proto: "udp", comment: "UT2004 — purpose unconfirmed, already open live; verify before removing" }

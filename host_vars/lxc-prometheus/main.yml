@@ -3,4 +3,6 @@
 
 cis_ufw_extra_ports:
 - { port: "9090", proto: "tcp", comment: "Prometheus metrics endpoint" }
+- { port: "9090", proto: "udp", comment: "Prometheus metrics endpoint — already manually allowed live 2026-09-21" }
 - { port: "9093", proto: "tcp", comment: "Alertmanager" }
+- { port: "9093", proto: "udp", comment: "Alertmanager — not currently running, already manually allowed live 2026-09-21" }

@@ -10,14 +10,44 @@ cis_sftp_password_users: "media"
 
 cis_ufw_extra_ports:
 - { port: "8096", proto: "tcp", comment: "Jellyfin web UI" }
+- { port: "8096", proto: "udp", comment: "Jellyfin web UI (already manually allowed live 2026-09-21)" }
 - { port: "21", proto: "tcp", comment: "vsftpd FTP control" }
+- { port: "21", proto: "udp", comment: "vsftpd FTP control (already manually allowed live 2026-09-21)" }
+- { port: "20", proto: "tcp", comment: "vsftpd FTP data (active mode) — already manually allowed live 2026-09-21, not declared before" }
+- { port: "20", proto: "udp", comment: "vsftpd FTP data (active mode) — already manually allowed live 2026-09-21" }
 - { port: "40000:40100", proto: "tcp", comment: "vsftpd FTP passive data" }
+- { port: "40000:40100", proto: "udp", comment: "vsftpd FTP passive data (already manually allowed live 2026-09-21)" }
+# Wider passive range, also already manually allowed live and overlapping
+# the one above — kept as-is rather than reconciled to one range, since the
+# intent behind having both isn't documented anywhere.
+- { port: "40000:50000", proto: "tcp", comment: "vsftpd FTP passive data — wider range, already manually allowed live 2026-09-21" }
+- { port: "40000:50000", proto: "udp", comment: "vsftpd FTP passive data — wider range, already manually allowed live 2026-09-21" }
+- { port: "30000:31000", proto: "tcp", comment: "vsftpd FTP passive data — third range, already manually allowed live 2026-09-21; purpose unconfirmed" }
+# Jellyfin client auto-discovery (UDP broadcast) — confirmed live-listening
+# on 0.0.0.0:7359 and already manually `ufw allow`-ed 2026-09-21; was never
+# declared here.
+- { port: "7359", proto: "udp", comment: "Jellyfin client auto-discovery" }
+- { port: "7359", proto: "tcp", comment: "Jellyfin (already manually allowed live 2026-09-21, TCP side not currently used)" }
+# Not currently listening on anything; already manually allowed live
+# 2026-09-21. Purpose unconfirmed — possibly a leftover reverse-proxy/DLNA
+# setup. Kept for compatibility per policy: allowed live -> declared here.
+- { port: "9091", proto: "tcp", comment: "Unconfirmed — already manually allowed live 2026-09-21" }
+- { port: "9091", proto: "udp", comment: "Unconfirmed — already manually allowed live 2026-09-21" }
+- { port: "80", proto: "tcp", comment: "Unconfirmed (no service currently listening) — already manually allowed live 2026-09-21" }
+- { port: "80", proto: "udp", comment: "Unconfirmed (no service currently listening) — already manually allowed live 2026-09-21" }
+- { port: "443", proto: "tcp", comment: "Unconfirmed (no service currently listening) — already manually allowed live 2026-09-21" }
+- { port: "443", proto: "udp", comment: "Unconfirmed (no service currently listening) — already manually allowed live 2026-09-21" }
 
-cis_preserve_services:
-- ssh
-- sshd
-- qemu-guest-agent
-- ufw
-- auditd
-- apparmor
+# NOTE: this used to be named cis_preserve_services, which Ansible's
+# variable precedence (play vars beat host_vars) silently ignored — that
+# bug already let a previous real run of security-harden.yml purge vsftpd
+# off this host entirely despite this override (confirmed via `dpkg -l
+# vsftpd` returning nothing, 2026-09-21). Renamed to
+# cis_preserve_services_extra, which the playbook now actually merges in.
+# Restored by restore-vsftpd.yml on 2026-09-21 — see that file.
+cis_preserve_services_extra:
 - vsftpd
+
+# Used by restore-vsftpd.yml. Matches the VM's own Proxmox notes
+# (config captured there before vsftpd was accidentally purged).
+vsftpd_local_root: /mnt/media

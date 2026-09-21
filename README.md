@@ -786,6 +786,8 @@ See [`docs/INVENTORY-CONSOLIDATION.md`](docs/INVENTORY-CONSOLIDATION.md) for an 
 
 See [`docs/BRAINSTORM-COMPARISON.md`](docs/BRAINSTORM-COMPARISON.md) for a research-backed comparison against comparable public projects (community-scripts/ProxmoxVE, chezmoi, home-manager, etc.) and ranked ideas for what would make this setup distinctive — prep work for a future website writeup, not yet acted on.
 
+See [`docs/FIREWALL-PORTS.md`](docs/FIREWALL-PORTS.md) for how to add or change a `security-harden.yml` UFW port on any of this repo's LXCs/VMs, and the current per-host port table.
+
 ---
 
 ## Preseed Template

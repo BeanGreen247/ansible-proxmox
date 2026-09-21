@@ -85,7 +85,7 @@ modules; read the playbook's own tags/guards instead).
 | Change which VMs get Guacamole Wake-on-Connect | `group_vars/all/guacamole_wol.yml` (`guacamole_wol_targets`) | `ansible-playbook deploy-guacamole-wol.yml` |
 | Add a new host to fleet-wide ops (`update_upgrade.yml`, `wazuh_agent_deploy.yml`, etc.) | `inventory/hosts.ini` (add under `[vms]` or `[lxcs]`) | whatever fleet-wide playbook you're running next — no separate "register" step |
 | Change Proxmox API credentials or `pm_node` | `group_vars/all/main.yml` (gitignored — copy from `example_of_main.yml` if it doesn't exist yet) | anything API-driven |
-| Add/change a CIS hardening rule | `cis-harden.yml` (task list) — check `cis_allow_ip_forward` host_vars override if the host runs Docker/NAT (see README's CIS section) | `ansible-playbook cis-harden.yml --limit <host>` |
+| Add/change a CIS hardening rule | `security-harden.yml` (task list) — check `cis_allow_ip_forward` host_vars override if the host runs Docker/NAT (see README's CIS section) | `ansible-playbook security-harden.yml --limit <host>` |
 
 For anything not in this table, check the relevant playbook's own header
 comment — it documents its own variables under "Inputs & variables" or

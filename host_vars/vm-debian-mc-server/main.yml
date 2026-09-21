@@ -4,4 +4,32 @@
 cis_ufw_extra_ports:
 - { port: "9900", proto: "tcp", comment: "Minecraft server" }
 - { port: "28258", proto: "tcp", comment: "Minecraft RCON / query" }
-- { port: "8443", proto: "tcp", comment: "MC management panel" }
+- { port: "28258", proto: "udp", comment: "Minecraft Query protocol (java listens udp too — confirmed live 2026-09-21)" }
+- { port: "8443", proto: "tcp", comment: "MC management panel (declared, not currently answering — verify before relying on it)" }
+- { port: "8443", proto: "udp", comment: "MC management panel — already manually allowed live 2026-09-21, not currently answering" }
+# Confirmed live 2026-09-21 (curl returned HTTP 200, Python BaseHTTPServer) —
+# this is the actual reachable panel per the VM's Proxmox notes
+# (http://192.168.0.142:8888), which 8443 above does not currently match.
+- { port: "8888", proto: "tcp", comment: "MC management panel (actually live)" }
+# vsftpd — actually running (confirmed via `ss`/`ufw status` 2026-09-21), just
+# not mentioned in this file before. Passive range not currently in use
+# (no matching ufw rule live); add one here if vsftpd.conf enables pasv mode.
+- { port: "21", proto: "tcp", comment: "vsftpd FTP control (confirmed live 2026-09-21)" }
+- { port: "21", proto: "udp", comment: "vsftpd FTP control — already manually allowed live 2026-09-21" }
+- { port: "22", proto: "udp", comment: "SSH is TCP-only; UDP side is inert but already manually allowed live 2026-09-21 — kept for compat" }
+- { port: "25565", proto: "tcp", comment: "Default Minecraft Java port — not currently listening (server runs on 9900 instead), already manually allowed live 2026-09-21" }
+- { port: "25565", proto: "udp", comment: "Default Minecraft Java port — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "2121", proto: "tcp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+- { port: "2121", proto: "udp", comment: "Unconfirmed — not currently listening, already manually allowed live 2026-09-21" }
+
+# Without this, CIS 2.x's "stop and disable unneeded services" /
+# "remove unneeded service packages" tasks would stop+purge vsftpd here
+# (it's on the default kill list and this host never declared an override
+# before) — caught by a --check --diff dry-run 2026-09-21 before it
+# happened for real. Named cis_preserve_services_extra, not
+# cis_preserve_services directly — see security-harden.yml's own note on
+# why (play vars silently beat host_vars for the latter name; this bug
+# already cost vm-debian-media-server and vm-debian-navidrome-bean their
+# vsftpd installs on a previous run, before this rename existed).
+cis_preserve_services_extra:
+- vsftpd

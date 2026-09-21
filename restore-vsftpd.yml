@@ -1,0 +1,73 @@
+# restore-vsftpd.yml
+#
+# Overview
+#   Reinstalls and reconfigures vsftpd on the two hosts where it was
+#   accidentally purged by a bug in cis-harden.yml/security-harden.yml:
+#   the play hardcoded cis_preserve_services as a play var, which Ansible's
+#   variable precedence (play vars beat host_vars) always overrode host_vars'
+#   attempt to protect vsftpd — so CIS 2.x's "remove unneeded service
+#   packages" task purged it on a real run despite both hosts declaring it
+#   protected. Confirmed via `dpkg -l vsftpd` returning nothing on both
+#   hosts, 2026-09-21. The bug itself is fixed in security-harden.yml
+#   (cis_preserve_services_extra, merged onto a baseline list that play
+#   vars can no longer clobber) — this playbook restores what the bug
+#   already broke before that fix existed.
+#
+#   Config content below is taken verbatim from each VM's own Proxmox
+#   Notes field (captured there when FTP was first set up, before the
+#   removal) — see docs/FIREWALL-PORTS.md for how to read that field.
+#
+# Target hosts
+#   ansible-playbook restore-vsftpd.yml
+#
+# Credit: Thomas Mozdren
+---
+- name: Restore vsftpd (reinstall + reconfigure after accidental CIS-hardening removal)
+  hosts: vm-debian-media-server:vm-debian-navidrome-bean
+  become: true
+  gather_facts: false
+
+  tasks:
+
+  - name: Install vsftpd
+    ansible.builtin.apt:
+      name: vsftpd
+      state: present
+      update_cache: true
+      cache_valid_time: 3600
+
+  - name: Deploy vsftpd.conf (per this VM's Proxmox notes)
+    ansible.builtin.copy:
+      dest: /etc/vsftpd.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        listen=YES
+        listen_ipv6=NO
+        local_enable=YES
+        write_enable=YES
+        chroot_local_user=YES
+        local_root={{ vsftpd_local_root }}
+        allow_writeable_chroot=YES
+        local_umask=000
+        pasv_enable=YES
+        pasv_min_port=40000
+        pasv_max_port=40100
+    notify: Restart vsftpd
+
+  - name: Ensure vsftpd is enabled and running
+    ansible.builtin.systemd:
+      name: vsftpd
+      state: started
+      enabled: true
+
+  - name: Print restore summary
+    ansible.builtin.debug:
+      msg: "vsftpd restored on {{ inventory_hostname }} — local_root={{ vsftpd_local_root }}. Verify with an actual FTP login before considering this done; directory ownership/permissions were NOT touched (untouched by the earlier purge, so left as-is)."
+
+  handlers:
+  - name: Restart vsftpd
+    ansible.builtin.systemd:
+      name: vsftpd
+      state: restarted

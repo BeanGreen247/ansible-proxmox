@@ -3,7 +3,7 @@
 # key on every LXC and VM so you can reach all hosts from your laptop directly.
 #
 # Background
-#   cis-harden.yml locks sshd to: AllowUsers ansibleuser <vm_enduser_name>
+#   security-harden.yml locks sshd to: AllowUsers ansibleuser <vm_enduser_name>
 #   This playbook makes sure <vm_enduser_name> actually exists everywhere and
 #   has your laptop's public key in its authorized_keys — even on LXCs that
 #   were never passed through setup-debian-base.yml.
@@ -100,7 +100,7 @@
     tags: [ access, ssh_key ]
 
   # ── Verify AllowUsers covers personal user ────────────────────────────
-  # cis-harden.yml already writes: AllowUsers ansibleuser <vm_enduser_name>
+  # security-harden.yml already writes: AllowUsers ansibleuser <vm_enduser_name>
   # This task is a safety net — it adds the user if the CIS block is absent
   # (e.g. CIS hardening has not been run yet on this host).
 

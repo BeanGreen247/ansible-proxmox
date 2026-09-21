@@ -11,13 +11,21 @@ cis_sftp_password_users: "ftpuser"
 cis_ufw_extra_ports:
 - { port: "4533", proto: "tcp", comment: "Navidrome music server" }
 - { port: "21", proto: "tcp", comment: "vsftpd FTP control" }
+- { port: "21", proto: "udp", comment: "vsftpd FTP control (already manually allowed live 2026-09-21 — kept for compat even though FTP is normally TCP-only)" }
 - { port: "40000:40100", proto: "tcp", comment: "vsftpd FTP passive data" }
+- { port: "40000:40100", proto: "udp", comment: "vsftpd FTP passive data (already manually allowed live 2026-09-21)" }
+- { port: "30000:31000", proto: "tcp", comment: "vsftpd FTP passive data — second range, already manually allowed live 2026-09-21; purpose of the second range unconfirmed" }
 
-cis_preserve_services:
-- ssh
-- sshd
-- qemu-guest-agent
-- ufw
-- auditd
-- apparmor
+# NOTE: this used to be named cis_preserve_services, which Ansible's
+# variable precedence (play vars beat host_vars) silently ignored — that
+# bug already let a previous real run of security-harden.yml purge vsftpd
+# off this host entirely despite this override (confirmed via `dpkg -l
+# vsftpd` returning nothing, 2026-09-21). Renamed to
+# cis_preserve_services_extra, which the playbook now actually merges in.
+# Restored by restore-vsftpd.yml on 2026-09-21 — see that file.
+cis_preserve_services_extra:
 - vsftpd
+
+# Used by restore-vsftpd.yml. Matches the VM's own Proxmox notes
+# (config captured there before vsftpd was accidentally purged).
+vsftpd_local_root: /mnt/music

@@ -314,8 +314,6 @@
     _required_vms: [ qemu-guest-agent ]
     # Informational only — reported when present, silently skipped when not
     _optional_svcs:
-    - wazuh-agent
-    - wazuh-manager
     - nginx
     - authelia
     - grafana-server
@@ -336,8 +334,12 @@
 
   - name: "[health] Evaluate optional services"
     ansible.builtin.set_fact:
-      _opt_wazuh_agent: "{{ ansible_facts.services['wazuh-agent.service'].state   | default(omit) }}"
-      _opt_wazuh_mgr: "{{ ansible_facts.services['wazuh-manager.service'].state | default(omit) }}"
+      # _opt_checked guarantees at least one real (non-omit) key/value pair
+      # even when none of the optional services below are installed —
+      # set_fact errors ("No key/value pairs provided") if every key
+      # resolves to omit, which happens on any host running none of
+      # nginx/authelia/grafana/prometheus (most of the fleet).
+      _opt_checked: true
       _opt_nginx: "{{ ansible_facts.services['nginx.service'].state         | default(omit) }}"
       _opt_authelia: "{{ ansible_facts.services['authelia.service'].state      | default(omit) }}"
       _opt_grafana: "{{ ansible_facts.services['grafana-server.service'].state | default(omit) }}"
@@ -370,8 +372,6 @@
       - "OS         : {{ ansible_distribution }} {{ ansible_distribution_version }}"
       - "ssh        : {{ (_ssh_state | default('') == 'running' or _sshd_state | default('') == 'running') | ternary('running', 'NOT RUNNING') }}"
       - "qemu-ga    : {{ _qga_state | default('N/A (LXC)') }}{{ (inventory_hostname in groups['vms'] and _qga_state | default('') != 'running') | ternary(' ← WARN', '') }}"
-      - "wazuh-agent: {{ _opt_wazuh_agent | default('not installed') }}"
-      - "wazuh-mgr  : {{ _opt_wazuh_mgr   | default('not installed') }}"
       - "nginx      : {{ _opt_nginx        | default('not installed') }}"
       - "authelia   : {{ _opt_authelia     | default('not installed') }}"
       - "grafana    : {{ _opt_grafana      | default('not installed') }}"
@@ -392,11 +392,27 @@
 
   tasks:
 
-  - name: "[health] Print consolidated fleet table"
+  - name: "[health] Start with an empty fleet row list"
+    ansible.builtin.set_fact:
+      _fleet_rows: []
+    changed_when: false
+
+  - name: "[health] Append fleet row per host"
     vars:
       _fleet: "{{ (groups['lxcs'] | default([])) + (groups['vms'] | default([])) }}"
-      _hdr: "=== Fleet Health Summary ============================================"
-      _ftr: "====================================================================="
+      _hv: "{{ hostvars[item] }}"
+      _ip: "{{ _hv.ansible_host | default('?') }}"
+      _known: "{{ _hv._health_ok is defined }}"
+      _st: "{{ _known | ternary(_hv._health_ok | default(false) | ternary('OK', 'DEGRADED'), 'UNREACHABLE') }}"
+      _os: "{{ _known | ternary(((_hv.ansible_distribution | default('?')) + ' ' + (_hv.ansible_distribution_version | default('')))[:14], '?') }}"
+    ansible.builtin.set_fact:
+      _fleet_rows: "{{ _fleet_rows + ['%-40s %-16s %-15s %s' | format(item, _ip, _os, _st)] }}"
+    loop: "{{ (groups['lxcs'] | default([])) + (groups['vms'] | default([])) }}"
+    changed_when: false
+
+  - name: "[health] Print consolidated fleet table"
     ansible.builtin.debug:
       msg: >-
-        {%- set ns = namespace(rows=[_hdr]) -%} {%- for h in _fleet -%} {%-   set hv = hostvars[h] -%} {%-   set ip = hv.ansible_host | default('?') -%} {%-   if hv._health_ok is defined -%} {%-     set st = hv._health_ok | ternary('OK         ', 'DEGRADED   ') -%} {%-     set os = (hv.ansible_distribution | default('?') + ' ' + hv.ansible_distribution_version | default(''))[:14] -%} {%-   else -%} {%-     set st = 'UNREACHABLE' -%} {%-     set os = '?' -%} {%-   endif -%} {%-   set _ = ns.rows.append('%-40s %-16s %-15s %s' | format(h, ip, os, st)) -%} {%- endfor -%} {%- set _ = ns.rows.append(_ftr) -%} {{ ns.rows | join('\n') }}
+        {{ ['=== Fleet Health Summary ============================================']
+           + _fleet_rows
+           + ['====================================================================='] }}

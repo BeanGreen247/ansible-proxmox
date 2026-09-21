@@ -1,16 +1,34 @@
-# cis-harden.yml
-# CIS Benchmark Level 1 Hardening — Debian/Ubuntu LXCs and VMs
+# security-harden.yml
+# CIS Benchmark Level 1 Hardening + Lynis-suggestion extras — Debian/Ubuntu
+# LXCs, VMs, and workstations
+#
+# ┌──────────────────────────────────────────────────────────────────────┐
+# │ SHARED FILE — lives in TWO repos, kept in sync BY HAND:               │
+# │   ansible-proxmox/security-harden.yml                                 │
+# │   ansible-stationctl/security-harden.yml                              │
+# │ They must stay byte-for-byte identical (same pattern as               │
+# │ docs/INVENTORY-CONSOLIDATION.md). There is no symlink or submodule    │
+# │ tying them together — whichever repo you edit this in, copy the      │
+# │ whole file verbatim to the other repo's copy in the SAME commit/PR    │
+# │ session, or the two fleets will silently drift out of hardening sync. │
+# └──────────────────────────────────────────────────────────────────────┘
 #
 # Overview
 #   Applies CIS Distribution Independent Linux Benchmark + Debian-specific
-#   controls to all managed hosts (lxcs + vms groups).  Controls that require
-#   kernel-level access (sysctl, auditd, module blacklisting) are attempted
-#   on all hosts; containers that cannot apply them will skip gracefully.
-#   Alpine hosts receive the subset of controls that apply to musl + OpenRC.
+#   controls, plus a small curated set of additional Lynis suggestions
+#   (fail2ban, rootkit/checksum diagnostics, unused-protocol blacklisting),
+#   to every managed host across both fleets: ansible-proxmox's lxcs + vms
+#   groups, and ansible-stationctl's workstations group.  Controls that
+#   require kernel-level access (sysctl, auditd, module blacklisting) are
+#   attempted on all hosts; containers that cannot apply them skip
+#   gracefully.  Alpine hosts receive the subset of controls that apply to
+#   musl + OpenRC.  Whichever of lxcs/vms/workstations don't exist in a
+#   given repo's inventory are simply unmatched (0 hosts) — harmless.
 #
 # What this playbook does (by CIS section)
 #   CIS 1 — Initial Setup
 #     1.1  Disable unused filesystem modules (VMs only — no effect in LXC)
+#     1.1b Blacklist unused network protocol kernel modules (dccp/sctp/rds/tipc)
 #     1.3  AppArmor: install, enforce
 #     1.5  Process hardening: ASLR, core dumps, dmesg restriction
 #     1.7  Warning banners (/etc/issue, /etc/issue.net, /etc/motd)
@@ -19,7 +37,10 @@
 #   CIS 3 — Network Configuration
 #     3.x  sysctl: disable IP forwarding, redirects, RA; enable SYN cookies, rp_filter
 #   CIS 4 — Host-Based Firewall
-#     4.x  UFW: install, allow SSH, default deny-incoming, enable
+#     4.x  UFW: install, allow SSH + any per-host extra ports, default
+#          deny-incoming, enable. See "Per-host ports" below — this is the
+#          section most likely to lock you out if a host's ports aren't
+#          declared before this runs.
 #   CIS 5 — Logging and Auditing
 #     5.x  auditd: install, enable, core audit rules
 #   CIS 6 — System Maintenance / Access Control
@@ -28,18 +49,34 @@
 #     6.3  login.defs: password aging, UMASK 027
 #     6.4  Filesystem permissions: sticky bit, suid/sgid audit
 #     6.5  System account shells locked, no empty passwords
+#   Extras — Lynis suggestions curated for zero realistic breakage risk
+#     x.1  fail2ban: install, enable sshd jail
+#     x.2  Diagnostic/hardening packages: libpam-tmpdir, libpam-passwdqc,
+#          debsums, apt-show-versions, rkhunter (on-demand, no timer)
+#
+# Per-host ports (CIS 4 / UFW) — READ BEFORE FIRST RUN ON A NEW HOST
+#   SSH (22) is always allowed. Every other port a host actually needs
+#   (VNC, FTP, HTTPS dashboards, game servers, exporters, ...) MUST be
+#   declared via that host's host_vars `cis_ufw_extra_ports`, e.g.:
+#     cis_ufw_extra_ports:
+#     - { port: "5901", proto: "tcp", comment: "TigerVNC remote desktop" }
+#   Known examples already declared: vm-debian-remote-desktop (VNC 5901),
+#   vm-debian-media-server / vm-debian-navidrome-bean (FTP 21 + passive
+#   range), lxc-wazuh (HTTPS 443), remote-workstation / local-workstation
+#   (VNC 5901 — see ansible-stationctl's host_vars). Do NOT add
+#   cis_ufw_extra_ports here in play vars — host_vars would be overridden.
 #
 # Safety guards
 #   * SSH port 22 opened in UFW BEFORE enabling firewall (prevents lockout)
 #   * ansibleuser sudoers entry preserved throughout
-#   * Services intentionally running (nginx, wazuh-manager, etc.) are NOT disabled
+#   * Services intentionally running (nginx, grafana-server, etc.) are NOT disabled
 #   * pam_faillock unlock_time=900s; ansibleuser is never locked by this playbook
 #   * AllowTcpForwarding is set to no per CIS; override cis_allow_tcp_fwd=true if needed
 #   * sysctl tasks use ignore_errors: true — LXC containers may reject some writes
 #   * auditd tasks use failed_when: false — auditd may not run in unprivileged LXC
 #
 # Tags (run individual sections)
-#   cis1       Section 1: Initial setup
+#   cis1       Section 1: Initial setup (incl. protocol module blacklist)
 #   cis2       Section 2: Disable unnecessary services
 #   cis3       Section 3: Network / sysctl
 #   cis4       Section 4: UFW firewall
@@ -47,13 +84,14 @@
 #   cis6_ssh   Section 6.1: SSH hardening
 #   cis6_pam   Section 6.2-6.3: PAM + login.defs
 #   cis6_fs    Section 6.4-6.5: Filesystem + account checks
+#   cis7       Extras: fail2ban + diagnostic/hardening packages
 #   cis_alpine Alpine-specific hardening subset
 #
 # Usage
-#   ansible-playbook cis-harden.yml                              # all sections, all hosts
-#   ansible-playbook cis-harden.yml --tags cis6_ssh             # SSH only
-#   ansible-playbook cis-harden.yml --limit lxcs --tags cis3    # sysctl on LXCs only
-#   ansible-playbook cis-harden.yml --limit vms                 # VMs only, all sections
+#   ansible-playbook security-harden.yml                          # all sections, all hosts
+#   ansible-playbook security-harden.yml --tags cis6_ssh          # SSH only
+#   ansible-playbook security-harden.yml --limit lxcs --tags cis3 # sysctl on LXCs only
+#   ansible-playbook security-harden.yml --limit workstations     # stationctl fleet only
 #
 # Re-running
 #   Fully idempotent.  Re-running after changes is safe and expected.
@@ -63,7 +101,7 @@
 
 # PLAY 1: Debian / Ubuntu hardening (apt-based hosts)
 - name: CIS Level 1 hardening — Debian / Ubuntu hosts
-  hosts: lxcs:vms
+  hosts: lxcs:vms:workstations
   gather_facts: true
   become: true
   ignore_unreachable: true
@@ -84,7 +122,10 @@
     cis_allow_tcp_fwd: false
 
     # ── Services to disable (leave running if host provides the service) ──
-    # Override cis_preserve_services in host_vars to keep specific services.
+    # To keep a service this list would otherwise stop/purge, set
+    # cis_preserve_services_extra in that host's host_vars (a plain list —
+    # it gets merged onto cis_preserve_services_baseline below). Do NOT set
+    # cis_preserve_services directly in host_vars — see the note there.
     cis_unneeded_services:
     - avahi-daemon
     - cups
@@ -104,7 +145,16 @@
     - tftp
     # Services that are intentionally present on some hosts — skip disabling.
     # Extend in host_vars/<host>/vault.yml or group_vars if needed.
-    cis_preserve_services:
+    # NOTE: this is intentionally NOT named cis_preserve_services directly.
+    # Ansible's variable precedence puts play vars ABOVE host_vars, so a
+    # host_vars/<host>/main.yml that set cis_preserve_services here would be
+    # silently ignored — that bug already caused a previous real run of
+    # this playbook to purge vsftpd off vm-debian-media-server and
+    # vm-debian-navidrome-bean despite both declaring it in host_vars
+    # (caught via --check --diff 2026-09-21, before it could happen a third
+    # time to vm-debian-mc-server). Per-host additions belong in
+    # cis_preserve_services_extra in host_vars — see the merge below.
+    cis_preserve_services_baseline:
     - ssh
     - sshd
     - qemu-guest-agent
@@ -114,15 +164,13 @@
     - cron
     - rsyslog
     - systemd-journald
-    - wazuh-agent
-    - wazuh-manager
-    - wazuh-indexer
-    - wazuh-dashboard
     - nginx
     - authelia
     - grafana-server
     - prometheus
     - node-exporter
+    - fail2ban
+    cis_preserve_services: "{{ cis_preserve_services_baseline + (cis_preserve_services_extra | default([])) }}"
     # ── PAM ────────────────────────────────────────────────────────────────
     cis_pw_minlen: 14
     cis_pw_minclass: 4 # require lower, upper, digit, special
@@ -187,6 +235,22 @@
         blacklist {{ m }}
         {% endfor %}
     when: _is_vm | bool
+    tags: [ cis1 ]
+
+  # 1.1b — Blacklist unused network protocol kernel modules (from
+  # ansible-stationctl's Lynis triage [NETW-3200] — none of these
+  # protocols are used anywhere in either fleet).
+  - name: "[CIS 1.1b] Blacklist unused network protocol kernel modules"
+    ansible.builtin.copy:
+      dest: /etc/modprobe.d/security-blacklist-protocols.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        install dccp /bin/false
+        install sctp /bin/false
+        install rds /bin/false
+        install tipc /bin/false
     tags: [ cis1 ]
 
   # 1.3 — AppArmor
@@ -580,7 +644,7 @@
       mode: "0640"
       content: |
         # CIS 5 — Audit Rules
-        # Generated by cis-harden.yml
+        # Generated by security-harden.yml
 
         ## Self-auditing — log changes to audit rules
         -w /etc/audit/ -p wa -k audit-config
@@ -680,7 +744,7 @@
       insertbefore: "^Match " # Keep global directives outside any Match block
       block: |
         # ── CIS Benchmark SSH Hardening ──────────────────────────────────
-        # Applied by cis-harden.yml; do not edit this block manually.
+        # Applied by security-harden.yml; do not edit this block manually.
 
         # CIS 6.1.1 — Only allow approved users
         AllowUsers {{ (cis_ssh_allowed_users | trim + ' ' + cis_ssh_extra_users | default('')) | trim }}
@@ -962,6 +1026,50 @@
     tags: [ cis6_fs ]
 
   # ════════════════════════════════════════════════════════════════════════
+  # CIS SECTION 7 (extras) — fail2ban + diagnostic/hardening packages
+  # ════════════════════════════════════════════════════════════════════════
+  # Curated from ansible-stationctl's Lynis triage — picked because none of
+  # this has any realistic chance of breaking SSH multiplexing, the dev
+  # toolchain, or existing services. See this file's header for what was
+  # deliberately left out (SSH port/session-limit/forwarding changes,
+  # compiler lockdown, extra auditd/AIDE cost) and why.
+
+  - name: "[CIS 7.1] Install fail2ban + diagnostic/hardening packages"
+    ansible.builtin.apt:
+      name:
+        - fail2ban           # bans hosts with repeated auth failures [DEB-0880]
+        - libpam-tmpdir      # sets $TMP/$TMPDIR per PAM session [DEB-0280]
+        - libpam-passwdqc    # password strength on future password changes [AUTH-9262]
+        - debsums            # verifies packages against known-good checksums [PKGS-7370]
+        - apt-show-versions  # patch-management visibility [PKGS-7394]
+        - rkhunter           # on-demand rootkit/malware scan, not a daemon [HRDN-7230]
+      state: present
+    tags: [ cis7 ]
+
+  # fail2ban's own default jail.conf ships the sshd jail DISABLED — a
+  # jail.local override is the documented way to enable it without editing
+  # the package-owned file directly (jail.local always wins on conflict).
+  - name: "[CIS 7.1] Enable fail2ban's sshd jail"
+    ansible.builtin.copy:
+      dest: /etc/fail2ban/jail.local
+      content: |
+        [sshd]
+        enabled = true
+      owner: root
+      group: root
+      mode: "0644"
+    notify: Restart fail2ban
+    tags: [ cis7 ]
+
+  - name: "[CIS 7.1] Ensure fail2ban is enabled and running"
+    ansible.builtin.systemd:
+      name: fail2ban
+      state: started
+      enabled: true
+    failed_when: false # may not have iptables/nftables access in unprivileged LXC
+    tags: [ cis7 ]
+
+  # ════════════════════════════════════════════════════════════════════════
   # Summary
   # ════════════════════════════════════════════════════════════════════════
 
@@ -974,11 +1082,13 @@
       - "  Type:       {{ _is_vm | bool | ternary('VM (full guest)', 'LXC container') }}"
       - "  SSH:        hardened — key-only, no root, approved ciphers"
       - "  sysctl:     applied (some may be no-ops in containers)"
-      - "  UFW:        enabled — default deny-in, SSH allowed"
+      - "  UFW:        enabled — default deny-in, SSH + per-host ports allowed"
       - "  auditd:     installed (may be no-op in unprivileged LXC)"
       - "  AppArmor:   installed and enforce mode set"
       - "  PAM:        pwquality + faillock configured"
       - "  login.defs: password aging and UMASK 027 set"
+      - "  fail2ban:   sshd jail enabled"
+      - "  rkhunter installed (on-demand — run 'sudo rkhunter --check' manually)"
       - "========================================================"
     tags: [ always ]
 
@@ -989,9 +1099,15 @@
       state: restarted
     failed_when: false
 
+  - name: Restart fail2ban
+    ansible.builtin.systemd:
+      name: fail2ban
+      state: restarted
+    failed_when: false
+
 # PLAY 2: Alpine-specific hardening (apk-based hosts)
 - name: CIS hardening subset — Alpine Linux hosts
-  hosts: lxcs:vms
+  hosts: lxcs:vms:workstations
   gather_facts: true
   become: true
   ignore_unreachable: true
@@ -1021,7 +1137,7 @@
     ansible.builtin.blockinfile:
       path: /etc/ssh/sshd_config
       block: |
-        # CIS Alpine SSH hardening — applied by cis-harden.yml
+        # CIS Alpine SSH hardening — applied by security-harden.yml
         PermitRootLogin no
         PasswordAuthentication no
         PermitEmptyPasswords no
@@ -1079,7 +1195,7 @@
       group: root
       mode: "0644"
       content: |
-        # CIS hardening — applied by cis-harden.yml
+        # CIS hardening — applied by security-harden.yml
         net.ipv4.tcp_syncookies = 1
         net.ipv4.conf.all.rp_filter = 1
         net.ipv4.conf.default.rp_filter = 1

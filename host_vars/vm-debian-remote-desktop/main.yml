@@ -3,7 +3,17 @@
 
 cis_ufw_extra_ports:
 - { port: "5901", proto: "tcp", comment: "VNC / TigerVNC remote desktop" }
+- { port: "5901", proto: "udp", comment: "VNC / TigerVNC remote desktop (already manually allowed live 2026-09-21)" }
 - { port: "8080", proto: "tcp", comment: "Docker reverse proxy" }
+# guacd (Apache Guacamole daemon) — confirmed live-listening on 0.0.0.0:4822
+# and already manually `ufw allow`-ed 2026-09-21; was never declared here.
+- { port: "4822", proto: "tcp", comment: "guacd (Apache Guacamole daemon)" }
+- { port: "4822", proto: "udp", comment: "guacd (already manually allowed live 2026-09-21)" }
+# Not currently listening on anything; already manually allowed live
+# 2026-09-21, distinct from 5901 above (not a typo of it). Purpose
+# unconfirmed — kept for compatibility per policy: allowed live -> declared.
+- { port: "5091", proto: "tcp", comment: "Unconfirmed — already manually allowed live 2026-09-21" }
+- { port: "5091", proto: "udp", comment: "Unconfirmed — already manually allowed live 2026-09-21" }
 # CUPS (631) is loopback-only — no UFW rule needed.
 # Tailscale and Cloudflare tunnel handle their own connectivity.
 
