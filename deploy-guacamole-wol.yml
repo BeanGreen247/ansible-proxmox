@@ -86,6 +86,29 @@
       msg: "{{ guacamole_wol_targets }}"
     tags: [ always ]
 
+  # The ARP-trigger listener used to fire on an ARP request for a target
+  # VM's IP from ANY source on the LAN — found live 2026-09-25: vm115 was
+  # autostarting even with Apache/guacd stopped, because ordinary LAN ARP
+  # chatter (routers/switches refreshing their tables, other hosts'
+  # stale-cache lookups, etc.) matches the exact same "who has X" pattern
+  # guacd's own failed connect produces, and the listener never checked who
+  # was actually asking. Resolving guacamole_host's real IP here so the
+  # template below can restrict triggering to ARP requests that actually
+  # came from the Guacamole host — the only legitimate source of "trying
+  # to reach this VM" traffic.
+  - name: "[wol] Resolve the Guacamole host's IP (only legitimate ARP-trigger source)"
+    ansible.builtin.set_fact:
+      guacamole_host_ip: "{{ hostvars[guacamole_host].ansible_host }}"
+    tags: [ always ]
+
+  - name: "[wol] Fail loudly if the Guacamole host's IP couldn't be resolved"
+    ansible.builtin.assert:
+      that: guacamole_host_ip is defined and guacamole_host_ip | length > 0
+      fail_msg: >-
+        Could not resolve ansible_host for guacamole_host
+        ({{ guacamole_host }}) — check inventory/hosts.ini.
+    tags: [ always ]
+
   - name: "[wol] Look up each target VM's net0 MAC address"
     ansible.builtin.command: "qm config {{ item.vmid }}"
     register: _qm_config
@@ -94,6 +117,16 @@
     loop_control:
       label: "vmid {{ item.vmid }}"
 
+  # Regex args use a SINGLE backslash ('\d', '\1'), not '\\d'/'\\1' — this is
+  # an unquoted '>-' folded scalar, not a double-quoted string. Confirmed
+  # live 2026-09-25: a double backslash here gets double-unescaped by the
+  # time Jinja evaluates it (ends up as a literal "\\d" in the regex, which
+  # never matches "net0:" — `select('match', ...)` silently returns an
+  # empty list, then `| first` blows up with "sequence was empty"), whereas
+  # the exact same pattern with a single backslash works correctly. A
+  # double-quoted "{{ ... }}" string on one line does need '\\d' (YAML's
+  # own double-quote escaping unescapes it once before Jinja sees it) — the
+  # two styles are not interchangeable here.
   - name: "[wol] Build target list with resolved MACs"
     ansible.builtin.set_fact:
       _wol_target_details: >-
@@ -104,9 +137,9 @@
                    if vm_categories is defined and (item.item.vmid | string) in vm_categories
                    else 'vmid ' ~ item.item.vmid),
           'mac': (item.stdout_lines
-                  | select('match', '^net\\d+:')
+                  | select('match', '^net\d+:')
                   | list | first
-                  | regex_search('=([0-9A-Fa-f:]{17})', '\\1'))[0],
+                  | regex_search('=([0-9A-Fa-f:]{17})', '\1'))[0],
         } ] }}
     loop: "{{ _qm_config.results }}"
     loop_control:

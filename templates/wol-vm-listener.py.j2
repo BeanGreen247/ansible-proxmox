@@ -18,6 +18,16 @@
 # connect retry, regardless of whether the target answers. Watching for that
 # is a reliable, protocol-and-bug-agnostic "something is trying to reach
 # this VM" signal.
+#
+# BUT that ARP pattern isn't unique to guacd — found live 2026-09-25: vm115
+# was autostarting even with Apache/guacd stopped, because ordinary LAN ARP
+# chatter (routers/switches refreshing their tables, other hosts' stale ARP
+# cache lookups, etc.) broadcasts the exact same "who has X" request for any
+# IP, from any host, constantly, regardless of what's actually trying to
+# reach it. The trigger below is restricted to ARP requests whose SENDER is
+# GUACAMOLE_HOST_IP — the only host that would ever legitimately be
+# ARPing for one of these VM IPs as a side effect of a real connection
+# attempt.
 import socket
 import struct
 import subprocess
@@ -37,6 +47,10 @@ ARP_TRIGGER_TO_VMID = {
     "{{ t.ip }}": {{ t.vmid }},  # {{ t.name }}
 {% endfor %}
 }
+
+# Only this host's ARP requests count as a real "someone's trying to
+# connect via Guacamole" signal — see the module docstring above.
+GUACAMOLE_HOST_IP = "{{ guacamole_host_ip }}"
 
 WOL_LISTEN_PORT = {{ guacamole_wol_udp_port | default(9) }}
 
@@ -88,7 +102,10 @@ def wol_listener():
 
 def arp_trigger_listener():
     raw = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
-    syslog.syslog(f"ARP trigger listener up, watching {ARP_TRIGGER_TO_VMID}")
+    syslog.syslog(
+        f"ARP trigger listener up, watching {ARP_TRIGGER_TO_VMID} "
+        f"(only from {GUACAMOLE_HOST_IP})"
+    )
     while True:
         packet, _ = raw.recvfrom(65535)
         if len(packet) < 42:
@@ -104,7 +121,10 @@ def arp_trigger_listener():
         vmid = ARP_TRIGGER_TO_VMID.get(target_ip)
         if vmid is None:
             continue
-        start_vm(vmid, f"ARP request for {target_ip}")
+        sender_ip = socket.inet_ntoa(arp[14:18])
+        if sender_ip != GUACAMOLE_HOST_IP:
+            continue
+        start_vm(vmid, f"ARP request for {target_ip} from Guacamole host")
 
 
 def main():
