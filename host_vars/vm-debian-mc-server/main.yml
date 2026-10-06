@@ -3,8 +3,8 @@
 
 cis_ufw_extra_ports:
 - { port: "9900", proto: "tcp", comment: "Minecraft server" }
-- { port: "28258", proto: "tcp", comment: "Minecraft RCON / query" }
-- { port: "28258", proto: "udp", comment: "Minecraft Query protocol (java listens udp too — confirmed live 2026-09-21)" }
+- { port: "28258", proto: "tcp", comment: "Geyser (Bedrock) port per owner 2026-10-01; previously labelled Minecraft RCON / query" }
+- { port: "28258", proto: "udp", comment: "Geyser (Bedrock) UDP port per owner 2026-10-01; java also listens udp here — confirmed live 2026-09-21" }
 - { port: "8443", proto: "tcp", comment: "MC management panel (declared, not currently answering — verify before relying on it)" }
 - { port: "8443", proto: "udp", comment: "MC management panel — already manually allowed live 2026-09-21, not currently answering" }
 # Confirmed live 2026-09-21 (curl returned HTTP 200, Python BaseHTTPServer) —
