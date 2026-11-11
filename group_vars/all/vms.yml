@@ -206,8 +206,8 @@ vms:
   # it does NOT hot-add RAM to the already-running guest (no memory
   # hotplug device configured on this VM). The extra 4GB only actually
   # applies after vmid 115 is rebooted.
-  memory: 8192
-  cores: 2
+  memory: 16384
+  cores: 4
   net0: "virtio,bridge=vmbr0"
   ostype: "l26"
   agent: 1
@@ -217,10 +217,10 @@ vms:
   # actually used. (First real build used 48G and had to be grown live —
   # see setup-base-debian.yml's swapfile-vs-partition note for why the
   # preseed layout below matters just as much as the size.)
-  disk_size_gb: 150
+  disk_size_gb: 250
   cpu: "host"
   storage: "vm-8tb-hdd0"
   preseed_install: true
-  preseed_ip: "192.168.0.162"
+  preseed_ip: "192.168.0.215"
   preseed_gateway: "192.168.0.1"
   preseed_hostname: "workstation-01"
